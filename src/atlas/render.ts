@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { MapSession, Province } from "../core/ir.ts";
-import { provinceRing } from "./outline.ts";
+import { provinceRings } from "./outline.ts";
 import { deriveFronts, type Selector } from "./select.ts";
 
 export type AtlasJson = {
@@ -16,11 +16,16 @@ export type AtlasJson = {
     terrain: string;
     state?: number;
     stateName?: string;
+    region?: number;
     owner?: string;
     controller?: string;
     cores: string[];
+    claims: string[];
     vp?: number;
     buildings: Record<string, number>;
+    navalSea?: number;
+    pixels: number;
+    bbox: { minX: number; minZ: number; maxX: number; maxZ: number };
     neighbors: number[];
     centroid: { x: number; z: number };
   }[];
@@ -68,6 +73,11 @@ export function buildAtlasJson(session: MapSession, selector: Selector, province
       for (const b of st?.provincialBuildings ?? []) {
         if (b.province === p.id) buildings[b.type] = b.level;
       }
+      const naval = session.buildings.find(
+        (b) =>
+          (b.building === "naval_base" || b.building === "floating_harbor") &&
+          Math.hypot(b.x - p.centroid.x, b.z - p.centroid.z) < 3,
+      );
       return {
         id: p.id,
         type: p.type,
@@ -75,11 +85,16 @@ export function buildAtlasJson(session: MapSession, selector: Selector, province
         terrain: p.terrain,
         state: p.stateId,
         stateName: st?.name,
+        region: p.regionId,
         owner: st?.owner,
         controller: st?.controller,
         cores: st?.cores ?? [],
+        claims: st?.claims ?? [],
         vp,
         buildings,
+        navalSea: naval?.seaProvince || undefined,
+        pixels: p.pixels,
+        bbox: p.bbox,
         neighbors: p.neighbors,
         centroid: p.centroid,
       };
@@ -103,13 +118,18 @@ export function renderSvg(session: MapSession, atlas: AtlasJson, provinces: Prov
   const labelSize = Math.max(8, Math.min(18, Math.floor(Math.sqrt((w * h) / Math.max(provinces.length, 1)) / 6)));
   const paths: string[] = [];
   for (const p of provinces) {
-    const ring = provinceRing(session, p.id);
+    const rings = provinceRings(session, p.id);
     const owner = ownerOf(session, p);
     const fill = owner && atlas.brushes[owner] ? atlas.brushes[owner]!.color : `rgb(${p.r},${p.g},${p.b})`;
     let d = "";
-    if (ring && ring.length > 2) {
-      const pts = ring.map((pt) => toSvg(pt.x, pt.z));
-      d = `M ${pts[0]!.x} ${pts[0]!.y} ` + pts.slice(1).map((pt) => `L ${pt.x} ${pt.y}`).join(" ") + " Z";
+    if (rings.length && rings[0]!.length > 2) {
+      d = rings
+        .map((ring) => {
+          const pts = ring.map((pt) => toSvg(pt.x, pt.z));
+          const close = rings.length === 1 ? " Z" : "";
+          return `M ${pts[0]!.x} ${pts[0]!.y} ` + pts.slice(1).map((pt) => `L ${pt.x} ${pt.y}`).join(" ") + close;
+        })
+        .join(" ");
     } else {
       const a = toSvg(p.bbox.minX, p.bbox.maxZ);
       const bw = p.bbox.maxX - p.bbox.minX + 1;

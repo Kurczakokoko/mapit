@@ -26,27 +26,46 @@ export const UI_HTML = `<!doctype html>
     .badge { padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; }
     .badge.ok { color: var(--ok); border-color: #335534; }
     .badge.bad { color: var(--bad); border-color: #6a332c; }
-    aside, .inspector { background: var(--panel); border-right: 1px solid var(--line); overflow: auto; padding: 12px; }
+    aside, .inspector { background: var(--panel); border-right: 1px solid var(--line); overflow: hidden; padding: 12px; display: flex; flex-direction: column; min-height: 0; }
     .inspector { border-right: 0; border-left: 1px solid var(--line); }
+    #brushes { overflow: auto; flex: 1; min-height: 0; margin-top: 8px; }
+    #errors { overflow: auto; flex: 1; min-height: 0; }
     #stage { position: relative; overflow: hidden; background: #080b0f; }
     canvas { image-rendering: pixelated; cursor: crosshair; display: block; }
+    #hud { position: absolute; left: 10px; bottom: 10px; display: flex; gap: 6px; align-items: center; pointer-events: none; }
+    #hud .btn { pointer-events: auto; padding: 5px 10px; }
+    #zoomlabel { color: var(--mute); font-variant-numeric: tabular-nums; padding: 0 6px; }
     h2 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--gold); font-weight: 600; }
     .brush { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 4px; cursor: pointer; }
     .brush.on { background: #1d2733; outline: 1px solid var(--gold); }
-    .swatch { width: 12px; height: 12px; border-radius: 2px; }
+    .swatch { width: 12px; height: 12px; border-radius: 2px; flex: none; }
     label { display: block; color: var(--mute); margin: 8px 0 4px; }
     select, input { width: 100%; background: #0c1016; color: var(--paper); border: 1px solid var(--line); padding: 6px 8px; border-radius: 4px; }
     footer { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; padding: 0 16px; border-top: 1px solid var(--line); background: #10161d; }
     .btn { background: #1b232e; color: var(--paper); border: 1px solid var(--line); padding: 7px 12px; border-radius: 4px; cursor: pointer; }
     .btn.gold { background: var(--gold); color: #1a1408; border-color: var(--gold); font-weight: 600; }
     .btn:disabled { opacity: 0.4; cursor: not-allowed; }
-    #info { white-space: pre-wrap; color: var(--mute); }
+    #info { white-space: pre-wrap; color: var(--mute); flex: 1; min-height: 72px; overflow: auto; }
     .err { color: var(--bad); }
     .hint { color: var(--mute); font-size: 12px; }
+    #brushmeta { margin-top: 6px; }
+    #stage.busy::after {
+      content: "Rendering map…";
+      position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(8,11,15,0.45); color: var(--paper);
+      letter-spacing: 0.08em; font-size: 12px; pointer-events: none;
+    }
+    .diag-group { margin-bottom: 8px; }
+    .diag-head { cursor: pointer; }
+    .diag-head:hover { color: var(--paper); }
+    .diag-body { display: none; padding: 4px 0 0 8px; }
+    .diag-group.open .diag-body { display: block; }
+    .diag-sample { cursor: pointer; color: var(--mute); }
+    .diag-sample:hover { color: var(--paper); }
     @media (max-width: 860px) {
       #app { grid-template-columns: 1fr; grid-template-rows: 48px auto minmax(220px, 1fr) auto auto; }
-      aside, .inspector { border: 0; border-bottom: 1px solid var(--line); max-height: 150px; }
-      #brushes { display: flex; flex-wrap: wrap; gap: 4px; }
+      aside, .inspector { border: 0; border-bottom: 1px solid var(--line); max-height: 180px; }
       footer { flex-wrap: wrap; height: auto; padding: 8px 12px; }
     }
   </style>
@@ -68,12 +87,23 @@ export const UI_HTML = `<!doctype html>
         <option value="core">core</option>
         <option value="claim">claim</option>
       </select>
+      <label>Search</label>
+      <input id="brushq" type="search" placeholder="search all tags" autocomplete="off"/>
+      <div id="brushmeta" class="hint"></div>
       <div id="brushes"></div>
     </aside>
-    <div id="stage"><canvas id="map"></canvas></div>
+    <div id="stage">
+      <canvas id="map"></canvas>
+      <div id="hud">
+        <button class="btn" id="zoomout" type="button">−</button>
+        <span id="zoomlabel">100%</span>
+        <button class="btn" id="zoomin" type="button">+</button>
+        <button class="btn" id="fit" type="button">Fit</button>
+      </div>
+    </div>
     <div class="inspector">
       <h2>Province</h2>
-      <div id="info">Click the map. Drag to paint.</div>
+      <div id="info">Scroll to zoom, drag with middle mouse or Space to pan, left-drag to paint.</div>
       <h2 style="margin-top:18px">Diagnostics</h2>
       <div id="errors"></div>
     </div>
@@ -82,19 +112,107 @@ export const UI_HTML = `<!doctype html>
       <button class="btn" id="discard">Discard</button>
       <button class="btn gold" id="apply">Apply to mod</button>
       <button class="btn" id="atlas">Download atlas.json</button>
-      <span class="hint">Pending paints split mixed states on Apply. A apply · U undo · drag to paint.</span>
+      <span class="hint" id="status">Wheel zoom · MMB / Space pan · Shift-click inspect · / search · A apply · U undo</span>
     </footer>
   </div>
   <script>
     const canvas = document.getElementById('map');
     const ctx = canvas.getContext('2d');
-    const state = { meta: null, img: null, ids: null, idW: 0, idH: 0, brush: null, painting: false, lastId: 0, lastHit: 0 };
+    const state = {
+      meta: null, img: null, brush: null, painting: false, panning: false, space: false,
+      lastId: 0, lastHit: 0, busy: false, camInit: false,
+      cam: { zoom: 1, panX: 0, panY: 0 },
+      panFrom: null, hoverTimer: 0
+    };
+    let chain = Promise.resolve();
+    function serial(fn) {
+      const p = chain.then(fn, fn);
+      chain = p.then(() => {}, () => {});
+      return p;
+    }
+    function setBusy(on) {
+      state.busy = on;
+      document.getElementById('apply').disabled = on;
+      document.getElementById('undo').disabled = on;
+      document.getElementById('discard').disabled = on;
+      document.getElementById('stage').classList.toggle('busy', on);
+    }
+    function fitZoom() {
+      if (!state.img) return 1;
+      return Math.min(canvas.width / state.img.width, canvas.height / state.img.height);
+    }
+    function fit() {
+      if (!state.img) return;
+      const z = fitZoom();
+      state.cam.zoom = z;
+      state.cam.panX = (canvas.width - state.img.width * z) / 2;
+      state.cam.panY = (canvas.height - state.img.height * z) / 2;
+      draw();
+    }
+    function zoomBy(factor, cx, cy) {
+      if (!state.img) return;
+      const old = state.cam.zoom;
+      const min = fitZoom() * 0.5;
+      const max = 32;
+      const nx = Math.max(min, Math.min(max, old * factor));
+      if (nx === old) return;
+      const px = cx - (cx - state.cam.panX) * (nx / old);
+      const py = cy - (cy - state.cam.panY) * (nx / old);
+      state.cam.zoom = nx;
+      state.cam.panX = px;
+      state.cam.panY = py;
+      draw();
+    }
+    function setCursor() {
+      canvas.style.cursor = state.panning || state.space ? (state.panning ? 'grabbing' : 'grab') : 'crosshair';
+    }
     async function json(url, opts) {
       const r = await fetch(url, opts);
-      if (!r.ok) throw new Error(await r.text());
+      if (!r.ok) {
+        const text = await r.text();
+        const err = new Error(text);
+        err.status = r.status;
+        throw err;
+      }
       return r.json();
     }
+    function renderBrushes() {
+      if (!state.meta) return;
+      const q = (document.getElementById('brushq').value || '').trim().toLowerCase();
+      const box = document.getElementById('brushes');
+      const scroll = box.scrollTop;
+      const rows = state.meta.countries.filter((c) => {
+        const match = !q || c.tag.toLowerCase().includes(q) || (c.name && c.name.toLowerCase().includes(q));
+        if (!match) return false;
+        if (!q && c.onMap === false) return false;
+        return true;
+      });
+      box.innerHTML = '';
+      for (const c of rows) {
+        const el = document.createElement('div');
+        el.className = 'brush' + (state.brush === c.tag ? ' on' : '');
+        el.innerHTML = '<span class="swatch" style="background:rgb(' + c.color.join(',') + ')"></span>' +
+          c.tag + (c.name && c.name !== c.tag ? ' ' + c.name : '');
+        el.onclick = () => {
+          state.brush = c.tag;
+          for (const n of box.querySelectorAll('.brush')) n.classList.toggle('on', n === el);
+        };
+        box.appendChild(el);
+      }
+      if (!state.brush && rows[0]) {
+        state.brush = rows[0].tag;
+        const first = box.querySelector('.brush');
+        if (first) first.classList.add('on');
+      }
+      box.scrollTop = scroll;
+      const onMap = (state.meta.countries || []).filter((c) => c.onMap !== false).length;
+      document.getElementById('brushmeta').textContent = q
+        ? rows.length + ' matches'
+        : onMap + ' on map · type to search the rest';
+    }
     async function reload() {
+      setBusy(true);
+      try {
       state.meta = await json('/api/meta');
       document.getElementById('mapmeta').textContent =
         state.meta.width + '×' + state.meta.height + ' · ' + state.meta.provinces + ' provinces · ' +
@@ -104,107 +222,290 @@ export const UI_HTML = `<!doctype html>
       badge.textContent = d.errors + ' errors / ' + d.warnings + ' warnings';
       badge.className = 'badge ' + (d.errors ? 'bad' : 'ok');
       document.getElementById('pendingmeta').textContent = state.meta.pending + ' pending';
-      document.getElementById('errors').innerHTML = (d.sample || []).map(e =>
-        '<div class="' + (e.severity === 'error' ? 'err' : '') + '">' + e.code + ': ' + e.message + '</div>'
-      ).join('');
-      if (!state.brush && state.meta.countries[0]) state.brush = state.meta.countries[0].tag;
-      const box = document.getElementById('brushes');
-      box.innerHTML = '';
-      for (const c of state.meta.countries) {
-        const el = document.createElement('div');
-        el.className = 'brush' + (state.brush === c.tag ? ' on' : '');
-        el.innerHTML = '<span class="swatch" style="background:rgb(' + c.color.join(',') + ')"></span>' +
-          c.tag + (c.name && c.name !== c.tag ? ' ' + c.name : '');
-        el.onclick = () => { state.brush = c.tag; reload(); };
-        box.appendChild(el);
+      const groups = d.groups || [];
+      let html = '';
+      if (groups.length) {
+        html = groups.map((g) => {
+          const samples = (g.samples || []).map((s) => {
+            const label = s.province
+              ? 'province ' + s.province
+              : (s.x !== undefined ? s.x + ',' + s.z : (s.message || g.message));
+            return '<div class="diag-sample" data-province="' + (s.province || '') +
+              '" data-x="' + (s.x ?? '') + '" data-z="' + (s.z ?? '') + '">' + label + '</div>';
+          }).join('');
+          return '<div class="diag-group' + (g.severity === 'error' ? ' err' : '') + '">' +
+            '<div class="diag-head">' + g.code + ' × ' + g.count +
+            (g.count === 1 ? ' — ' + g.message : '') + '</div>' +
+            '<div class="diag-body">' + samples + '</div></div>';
+        }).join('');
+      } else {
+        const errs = d.sampleErrors || (d.sample || []).filter((e) => e.severity === 'error');
+        const warns = d.sampleWarnings || (d.sample || []).filter((e) => e.severity !== 'error');
+        const line = (e) => '<div class="' + (e.severity === 'error' ? 'err' : '') + '">' + e.code + ': ' + e.message + '</div>';
+        html = errs.map(line).join('') + warns.map(line).join('');
       }
+      document.getElementById('errors').innerHTML = html;
+      renderBrushes();
       const img = new Image();
       img.src = '/api/preview.png?' + Date.now();
       await img.decode();
       state.img = img;
-      const idImg = await fetch('/api/idmap.png?' + Date.now()).then(r => r.blob()).then(createImageBitmap);
-      const off = document.createElement('canvas');
-      off.width = idImg.width; off.height = idImg.height;
-      const ictx = off.getContext('2d');
-      ictx.drawImage(idImg, 0, 0);
-      const pix = ictx.getImageData(0, 0, off.width, off.height).data;
-      const ids = new Uint32Array(off.width * off.height);
-      for (let i = 0; i < ids.length; i++) ids[i] = (pix[i*4] << 16) | (pix[i*4+1] << 8) | pix[i*4+2];
-      state.ids = ids; state.idW = off.width; state.idH = off.height;
       layout();
-      if (state.lastHit) await hit(state.lastHit);
+      if (state.lastHit) await showProvince(state.lastHit);
+      } finally {
+        if (!state.painting) setBusy(false);
+      }
     }
     function layout() {
       const stage = document.getElementById('stage');
+      const oldW = canvas.width, oldH = canvas.height;
       canvas.width = stage.clientWidth;
       canvas.height = stage.clientHeight;
-      draw();
+      if (!state.img) return;
+      if (!state.camInit) {
+        fit();
+        state.camInit = true;
+      } else {
+        state.cam.panX += (canvas.width - oldW) / 2;
+        state.cam.panY += (canvas.height - oldH) / 2;
+        draw();
+      }
     }
     function mapPoint(ev) {
-      if (!state.img) return null;
+      if (!state.img || !state.meta) return null;
       const r = canvas.getBoundingClientRect();
-      const scale = Math.min(canvas.width / state.img.width, canvas.height / state.img.height);
-      const ox = (canvas.width - state.img.width * scale) / 2;
-      const oy = (canvas.height - state.img.height * scale) / 2;
-      const x = Math.floor((ev.clientX - r.left - ox) / scale);
-      const y = Math.floor((ev.clientY - r.top - oy) / scale);
-      if (x < 0 || y < 0 || x >= state.idW || y >= state.idH) return null;
-      return { x, y, id: state.ids[y * state.idW + x] };
+      const x = (ev.clientX - r.left - state.cam.panX) / state.cam.zoom;
+      const y = (ev.clientY - r.top - state.cam.panY) / state.cam.zoom;
+      if (x < 0 || y < 0 || x >= state.img.width || y >= state.img.height) return null;
+      const mx = Math.min(state.meta.width - 1, Math.floor((x * state.meta.width) / state.img.width));
+      const mz = state.meta.height - 1 - Math.min(state.meta.height - 1, Math.floor((y * state.meta.height) / state.img.height));
+      return { x: mx, z: mz };
     }
     function draw() {
       ctx.fillStyle = '#080b0f';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       if (!state.img) return;
-      const scale = Math.min(canvas.width / state.img.width, canvas.height / state.img.height);
-      const w = state.img.width * scale, h = state.img.height * scale;
-      ctx.drawImage(state.img, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h);
+      ctx.imageSmoothingEnabled = state.cam.zoom < 1.5;
+      ctx.drawImage(state.img, state.cam.panX, state.cam.panY, state.img.width * state.cam.zoom, state.img.height * state.cam.zoom);
+      const fitZ = fitZoom();
+      document.getElementById('zoomlabel').textContent = Math.round((state.cam.zoom / fitZ) * 100) + '%';
     }
-    async function hit(id) {
-      if (!id) return;
-      state.lastHit = id;
-      const p = await json('/api/province/' + id);
+    function zoomToMap(mx, mz, factor) {
+      if (!state.img || !state.meta) return;
+      const ix = (mx / state.meta.width) * state.img.width;
+      const iy = ((state.meta.height - 1 - mz) / state.meta.height) * state.img.height;
+      const z = Math.min(32, Math.max(fitZoom() * (factor || 8), fitZoom() * 4));
+      state.cam.zoom = z;
+      state.cam.panX = canvas.width / 2 - ix * z;
+      state.cam.panY = canvas.height / 2 - iy * z;
+      draw();
+    }
+    async function jumpToProvince(id, x, z) {
+      if (id) {
+        try {
+          const p = await json('/api/province/' + id);
+          showPayload(p);
+          if (p.centroid) zoomToMap(p.centroid.x, p.centroid.z, 10);
+          return;
+        } catch (e) {
+          if (e.status !== 404) throw e;
+        }
+      }
+      if (x !== '' && z !== '' && x !== undefined && z !== undefined) zoomToMap(Number(x), Number(z), 10);
+    }
+    function showPayload(p) {
+      if (!p) return;
+      state.lastHit = p.id;
       document.getElementById('info').textContent =
         'Province ' + p.id + '\\n' + p.type + (p.coastal ? ' coastal' : '') +
-        '\\nowner ' + (p.owner || '—') + '\\nstate ' + (p.stateName || p.state || '—') +
+        '\\nowner ' + (p.owner || '—') + (p.pending ? ' (pending)' : '') +
+        '\\ncontroller ' + (p.controller || '—') +
+        '\\ncores ' + ((p.cores && p.cores.length) ? p.cores.join(', ') : '—') +
+        '\\nclaims ' + ((p.claims && p.claims.length) ? p.claims.join(', ') : '—') +
+        '\\nstate ' + (p.stateName || p.state || '—') +
         '\\nterrain ' + p.terrain + (p.vp ? '\\nVP ' + p.vp : '') +
         '\\nneighbors ' + (p.neighbors || []).join(', ');
     }
-    async function paintAt(id) {
-      if (!id || !state.brush || id === state.lastId) return;
-      state.lastId = id;
+    async function showProvince(id) {
+      if (!id) return;
+      try {
+        const p = await json('/api/province/' + id);
+        showPayload(p);
+      } catch (e) {
+        if (e.status !== 404) throw e;
+      }
+    }
+    async function paintAt(mx, mz) {
+      if (!state.brush) return;
+      const hit = await json('/api/hit', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ x: mx, z: mz })
+      });
+      if (!hit.province || hit.id === state.lastId) {
+        if (hit.province) showPayload(hit.province);
+        return;
+      }
+      if (hit.province.type !== 'land') {
+        showPayload(hit.province);
+        return;
+      }
+      state.lastId = hit.id;
+      showPayload(hit.province);
       await json('/api/paint', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ layer: document.getElementById('layer').value, brush: state.brush, provinces: [id] })
+        body: JSON.stringify({ layer: document.getElementById('layer').value, brush: state.brush, provinces: [hit.id] })
       });
     }
-    canvas.addEventListener('mousedown', async (ev) => {
+    function hoverAt(ev) {
+      const pt = mapPoint(ev);
+      if (!pt) return;
+      clearTimeout(state.hoverTimer);
+      state.hoverTimer = setTimeout(() => {
+        serial(async () => {
+          const hit = await json('/api/hit', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ x: pt.x, z: pt.z })
+          });
+          if (hit.province && !state.painting) showPayload(hit.province);
+        });
+      }, 60);
+    }
+    canvas.addEventListener('contextmenu', (ev) => ev.preventDefault());
+    canvas.addEventListener('mousedown', (ev) => {
+      if (state.busy) return;
+      if (ev.shiftKey && ev.button === 0) {
+        const pt = mapPoint(ev);
+        if (pt) {
+          serial(async () => {
+            const hit = await json('/api/hit', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ x: pt.x, z: pt.z })
+            });
+            if (hit.province) showPayload(hit.province);
+          });
+        }
+        ev.preventDefault();
+        return;
+      }
+      if (ev.button === 1 || ev.button === 2 || state.space || ev.altKey) {
+        state.panning = true;
+        state.panFrom = { x: ev.clientX, y: ev.clientY, panX: state.cam.panX, panY: state.cam.panY };
+        setCursor();
+        ev.preventDefault();
+        return;
+      }
+      if (ev.button !== 0) return;
       const pt = mapPoint(ev);
       if (!pt) return;
       state.painting = true;
       state.lastId = 0;
-      await hit(pt.id);
-      await paintAt(pt.id);
+      setBusy(true);
+      serial(() => paintAt(pt.x, pt.z));
     });
-    canvas.addEventListener('mousemove', async (ev) => {
-      const pt = mapPoint(ev);
-      if (!pt) return;
-      if (state.painting) await paintAt(pt.id);
+    canvas.addEventListener('mousemove', (ev) => {
+      if (state.panning && state.panFrom) {
+        state.cam.panX = state.panFrom.panX + (ev.clientX - state.panFrom.x);
+        state.cam.panY = state.panFrom.panY + (ev.clientY - state.panFrom.y);
+        draw();
+        return;
+      }
+      if (state.painting) {
+        const pt = mapPoint(ev);
+        if (pt) serial(() => paintAt(pt.x, pt.z));
+        return;
+      }
+      hoverAt(ev);
     });
-    window.addEventListener('mouseup', async () => {
-      if (state.painting) { state.painting = false; await reload(); }
+    window.addEventListener('mouseup', () => {
+      if (state.panning) {
+        state.panning = false;
+        state.panFrom = null;
+        setCursor();
+        return;
+      }
+      if (!state.painting) return;
+      state.painting = false;
+      serial(async () => { await reload(); setBusy(false); });
     });
-    document.getElementById('undo').onclick = async () => { await json('/api/undo', { method: 'POST' }); await reload(); };
-    document.getElementById('discard').onclick = async () => { await json('/api/discard', { method: 'POST' }); await reload(); };
-    document.getElementById('apply').onclick = async () => {
+    canvas.addEventListener('wheel', (ev) => {
+      ev.preventDefault();
+      const r = canvas.getBoundingClientRect();
+      const factor = ev.deltaY < 0 ? 1.18 : 1 / 1.18;
+      zoomBy(factor, ev.clientX - r.left, ev.clientY - r.top);
+    }, { passive: false });
+    canvas.addEventListener('dblclick', (ev) => {
+      const r = canvas.getBoundingClientRect();
+      zoomBy(1.8, ev.clientX - r.left, ev.clientY - r.top);
+    });
+    document.getElementById('errors').addEventListener('click', (ev) => {
+      const sample = ev.target.closest('.diag-sample');
+      if (sample) {
+        serial(() => jumpToProvince(sample.dataset.province, sample.dataset.x, sample.dataset.z));
+        return;
+      }
+      const head = ev.target.closest('.diag-head');
+      if (head) head.parentElement.classList.toggle('open');
+    });
+    document.getElementById('zoomin').onclick = () => zoomBy(1.25, canvas.width / 2, canvas.height / 2);
+    document.getElementById('zoomout').onclick = () => zoomBy(1 / 1.25, canvas.width / 2, canvas.height / 2);
+    document.getElementById('fit').onclick = () => fit();
+    document.getElementById('brushq').addEventListener('input', renderBrushes);
+    document.getElementById('undo').onclick = () => serial(async () => { await json('/api/undo', { method: 'POST' }); await reload(); });
+    document.getElementById('discard').onclick = () => serial(async () => { await json('/api/discard', { method: 'POST' }); await reload(); });
+    document.getElementById('apply').onclick = () => serial(async () => {
       const r = await json('/api/apply', { method: 'POST' });
-      alert('Wrote ' + r.wrote.length + ' files, new states ' + r.createdStates);
+      document.getElementById('status').textContent = 'Wrote ' + r.wrote.length + ' files, new states ' + r.createdStates;
       await reload();
+    });
+    document.getElementById('atlas').onclick = () => {
+      const a = document.createElement('a');
+      a.href = '/api/atlas.json';
+      a.download = 'atlas.json';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
     };
-    document.getElementById('atlas').onclick = () => { location.href = '/api/atlas.json'; };
     window.addEventListener('keydown', (ev) => {
-      if (ev.key === 'a') document.getElementById('apply').click();
-      if (ev.key === 'u') document.getElementById('undo').click();
+      if (ev.key === '/' && !ev.metaKey && !ev.ctrlKey && !ev.altKey) {
+        const tag = (ev.target && ev.target.tagName) || '';
+        if (tag !== 'INPUT' && tag !== 'TEXTAREA') {
+          ev.preventDefault();
+          document.getElementById('brushq').focus();
+          document.getElementById('brushq').select();
+          return;
+        }
+      }
+      if (ev.key === 'Escape') {
+        const q = document.getElementById('brushq');
+        q.value = '';
+        renderBrushes();
+        q.blur();
+        return;
+      }
+      if (ev.code === 'Space') {
+        if (!state.space) { state.space = true; setCursor(); }
+        if (ev.target === document.body || ev.target === canvas) ev.preventDefault();
+        return;
+      }
+      if (state.busy || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+      const tag = (ev.target && ev.target.tagName) || '';
+      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+      if (ev.key === 'ArrowLeft') { state.cam.panX += 60; draw(); ev.preventDefault(); }
+      if (ev.key === 'ArrowRight') { state.cam.panX -= 60; draw(); ev.preventDefault(); }
+      if (ev.key === 'ArrowUp') { state.cam.panY += 60; draw(); ev.preventDefault(); }
+      if (ev.key === 'ArrowDown') { state.cam.panY -= 60; draw(); ev.preventDefault(); }
+      if (ev.key === 'a' || ev.key === 'A') document.getElementById('apply').click();
+      if (ev.key === 'u' || ev.key === 'U') document.getElementById('undo').click();
+      if (ev.key === '0' || ev.key === 'f' || ev.key === 'F') fit();
+      if (ev.key === '+' || ev.key === '=') zoomBy(1.25, canvas.width / 2, canvas.height / 2);
+      if (ev.key === '-' || ev.key === '_') zoomBy(1 / 1.25, canvas.width / 2, canvas.height / 2);
+    });
+    window.addEventListener('keyup', (ev) => {
+      if (ev.code === 'Space') { state.space = false; setCursor(); }
     });
     window.addEventListener('resize', layout);
     reload().catch((e) => { document.getElementById('info').textContent = e.message; });

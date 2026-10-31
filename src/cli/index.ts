@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { defineCommand, runMain } from "citty";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildAtlasJson, renderSvg, writeAtlas } from "../atlas/render.ts";
 import { parseSelector, selectProvinces } from "../atlas/select.ts";
@@ -27,9 +28,11 @@ const doctor = defineCommand({
     console.log("Mapit doctor");
     console.log(`  node     ${process.version}`);
     console.log(`  game     ${game ?? "(not found)"}`);
+    const provinces = game ? join(game, "map", "provinces.bmp") : undefined;
+    console.log(`  provinces.bmp  ${provinces && existsSync(provinces) ? "ok" : "missing"}`);
     console.log(`  mod      ${cfg.mod ?? "(not set)"}`);
     console.log(`  config   mapit.json or ${process.env.HOME}/.config/mapit/config.json`);
-    if (!game) process.exitCode = 1;
+    if (!game || !provinces || !existsSync(provinces)) process.exitCode = 1;
   },
 });
 
@@ -56,7 +59,9 @@ const inspect = defineCommand({
     const sea = [...session.provinces.values()].filter((p) => p.type === "sea" && p.pixels > 0).length;
     const v = validate(session);
     const warningCodes: Record<string, number> = {};
+    const errorCodes: Record<string, number> = {};
     for (const w of v.warnings) warningCodes[w.code] = (warningCodes[w.code] ?? 0) + 1;
+    for (const e of v.errors) errorCodes[e.code] = (errorCodes[e.code] ?? 0) + 1;
     const payload = {
       width: session.width,
       height: session.height,
@@ -71,10 +76,12 @@ const inspect = defineCommand({
       railways: session.railways.length,
       errors: v.errors.length,
       warnings: v.warnings.length,
+      errorCodes,
       warningCodes,
       sampleErrors: v.errors.slice(0, 20),
       sampleWarnings: v.warnings.slice(0, 12),
     };
+    if (v.errors.length) process.exitCode = 1;
     if (args.json) {
       console.log(JSON.stringify(payload, null, 2));
       return;
@@ -89,6 +96,10 @@ const inspect = defineCommand({
     console.log(`  errors     ${v.errors.length}`);
     console.log(`  warnings   ${v.warnings.length}`);
     if (v.errors.length) {
+      const parts = Object.entries(errorCodes)
+        .sort((a, b) => b[1] - a[1])
+        .map(([code, n]) => `${code} ${n}`);
+      console.log(`  error codes    ${parts.join(", ")}`);
       console.log(formatDiagnostics({ ...v, all: v.errors.slice(0, 20), warnings: [] }));
       if (v.errors.length > 20) console.log(`  … ${v.errors.length - 20} more errors`);
     }
@@ -105,33 +116,32 @@ const validateCmd = defineCommand({
   meta: { name: "validate", description: "Run the HOI4 map crash encyclopedia" },
   args: {
     ...shared,
-    fix: { type: "boolean", description: "Auto-fix coastal flags and naval-base sea links (in memory; use with apply to write)" },
+    fix: { type: "boolean", description: "Write coastal flags and naval-base sea links (requires --mod)" },
   },
   async run({ args }) {
     const session = await openSession(args);
     if (args.fix) {
+      const mod = resolveLoadOptions(args).modPath;
+      if (!mod) throw new Error("validate --fix requires --mod PATH (or mapit init --mod)");
       const c = autoFixCoastal(session);
       const n = fixNavalBases(session);
       console.log(`Auto-fix: coastal ${c}, naval bases ${n}`);
-      const mod = resolveLoadOptions(args).modPath;
-      if (mod) {
-        mkdirSync(join(mod, "map"), { recursive: true });
-        const defs = [...session.provinces.values()]
-          .sort((a, b) => a.id - b.id)
-          .map((p) => ({
-            id: p.id,
-            r: p.r,
-            g: p.g,
-            b: p.b,
-            type: p.type,
-            coastal: p.coastal,
-            terrain: p.terrain,
-            continent: p.continent,
-          }));
-        writeFileSync(join(mod, "map/definition.csv"), writeDefinitionCsv(defs));
-        writeFileSync(join(mod, "map/buildings.txt"), writeBuildingsTxt(session.buildings));
-        console.log(`Wrote ${mod}/map/definition.csv and buildings.txt`);
-      }
+      mkdirSync(join(mod, "map"), { recursive: true });
+      const defs = [...session.provinces.values()]
+        .sort((a, b) => a.id - b.id)
+        .map((p) => ({
+          id: p.id,
+          r: p.r,
+          g: p.g,
+          b: p.b,
+          type: p.type,
+          coastal: p.coastal,
+          terrain: p.terrain,
+          continent: p.continent,
+        }));
+      writeFileSync(join(mod, "map/definition.csv"), writeDefinitionCsv(defs));
+      writeFileSync(join(mod, "map/buildings.txt"), writeBuildingsTxt(session.buildings));
+      console.log(`Wrote ${mod}/map/definition.csv and buildings.txt`);
     }
     const v = validate(session);
     console.log(formatDiagnostics(v));
@@ -165,10 +175,10 @@ const paint = defineCommand({
   meta: { name: "paint", description: "Assign a brush (country tag) to provinces and write the mod" },
   args: {
     ...shared,
-    layer: { type: "positional", description: "owner", required: true },
+    layer: { type: "positional", description: "owner | controller | core | claim", required: true },
     brush: { type: "positional", description: "Country tag, e.g. SPA", required: true },
     provinces: { type: "string", description: "Comma-separated province IDs" },
-    apply: { type: "boolean", description: "Write the mod (default true)", default: true },
+    apply: { type: "boolean", description: "Write the mod (default true). Pass --no-apply to only queue.", default: true },
   },
   async run({ args }) {
     const session = await openSession(args);
@@ -182,6 +192,10 @@ const paint = defineCommand({
       throw new Error("layer must be owner|controller|core|claim");
     }
     queuePaint(session, { layer, brush: String(args.brush).toUpperCase(), provinces: ids });
+    if (args.apply === false) {
+      console.log(`Queued ${ids.length} provinces as ${args.brush} on ${layer} (${session.pending.length} pending)`);
+      return;
+    }
     const mod = resolveLoadOptions(args).modPath;
     if (!mod) throw new Error("paint --apply needs a mod path (`mapit init --mod`)");
     const result = applyPending(session, mod);
@@ -194,16 +208,20 @@ const generate = defineCommand({
   meta: { name: "generate", description: "Build a full HOI4 map from a layer pack (EarthToHoI4-class)" },
   args: {
     layers: { type: "positional", description: "Path to a layer pack directory", required: true },
-    out: { type: "string", description: "Output mod folder", required: true },
-    preview: { type: "boolean", description: "Write report + preview PNGs, do not write a mod" },
+    out: { type: "string", description: "Output mod folder (optional with --preview)" },
+    preview: { type: "boolean", description: "Write report + preview PNGs; skip keeping a launchable mod" },
     game: { type: "string", description: "HOI4 install (copy vanilla palettes)" },
     seed: { type: "string", description: "RNG seed" },
     name: { type: "string", description: "Mod display name" },
   },
   async run({ args }) {
+    if (!args.preview && !args.out) {
+      throw new Error("mapit generate needs --out (omit only with --preview)");
+    }
+    const outDir = args.out ? String(args.out) : mkdtempSync(join(tmpdir(), "mapit-preview-"));
     const result = await generateWorld({
       layersDir: String(args.layers),
-      outDir: String(args.out),
+      outDir,
       preview: Boolean(args.preview),
       gamePath: args.game ?? findHoi4Install(),
       seed: args.seed ? Number(args.seed) : undefined,

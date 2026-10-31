@@ -4,6 +4,7 @@ import type {
   Railway,
   SupplyNode,
 } from "../core/ir.ts";
+import { asRecord, parsePdx } from "./clausewitz.ts";
 
 export function parseBuildingsTxt(text: string): BuildingPlacement[] {
   const rows: BuildingPlacement[] = [];
@@ -140,19 +141,99 @@ export function parseContinents(text: string): string[] {
   return match[1]!.trim().split(/\s+/).filter(Boolean);
 }
 
-export function parseCountryTags(text: string): { tag: string; file: string }[] {
+export function parseCountryTags(text: string): { tag: string; file: string; dynamic: boolean }[] {
+  const dynamicFile = /^\s*dynamic_tags\s*=\s*yes\b/m.test(text);
   const rows = [];
   for (const line of text.split(/\r?\n/)) {
     const m = line.match(/^\s*([A-Z0-9]{3})\s*=\s*"([^"]+)"/);
-    if (m) rows.push({ tag: m[1]!, file: m[2]! });
+    if (m) {
+      const file = m[2]!;
+      const dynamic = dynamicFile || /generic\.txt$/i.test(file.replace(/\\/g, "/"));
+      rows.push({ tag: m[1]!, file, dynamic });
+    }
   }
   return rows;
 }
 
+/** Political-map color from a country file. `color_ui` is ignored. */
 export function parseCountryColor(text: string): [number, number, number] | undefined {
-  const m = text.match(/color\s*=\s*\{\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*\}/);
+  const re =
+    /(?<![A-Za-z0-9_])color\s*=\s*(?:(rgb|hsv|HSV|hsv360)\s*)?\{\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*\}/g;
+  const m = re.exec(text);
   if (!m) return undefined;
-  return [Number(m[1]), Number(m[2]), Number(m[3])];
+  return decodeColorComponents(m[1], Number(m[2]), Number(m[3]), Number(m[4]));
+}
+
+/** `common/countries/colors.txt` — this is what the in-game political map uses. */
+export async function parseColorsTxt(text: string): Promise<Map<string, [number, number, number]>> {
+  const root = asRecord(await parsePdx(text));
+  const out = new Map<string, [number, number, number]>();
+  for (const [tag, body] of Object.entries(root)) {
+    if (!/^[A-Za-z0-9]{3}$/.test(tag)) continue;
+    const color = colorFromUnknown(asRecord(body).color);
+    if (color) out.set(tag.toUpperCase(), color);
+  }
+  return out;
+}
+
+export function colorFromUnknown(value: unknown): [number, number, number] | undefined {
+  if (Array.isArray(value) && value.length >= 3) {
+    return decodeColorComponents(undefined, Number(value[0]), Number(value[1]), Number(value[2]));
+  }
+  if (!value || typeof value !== "object") return undefined;
+  const rec = value as Record<string, unknown>;
+  if (rec.rgb !== undefined) return colorFromUnknown(rec.rgb);
+  if (rec.hsv !== undefined) return colorFromUnknownKind("hsv", rec.hsv);
+  if (rec.HSV !== undefined) return colorFromUnknownKind("hsv", rec.HSV);
+  if (rec.hsv360 !== undefined) return colorFromUnknownKind("hsv360", rec.hsv360);
+  if (rec.HSV360 !== undefined) return colorFromUnknownKind("hsv360", rec.HSV360);
+  return undefined;
+}
+
+function colorFromUnknownKind(kind: string, value: unknown): [number, number, number] | undefined {
+  const arr = Array.isArray(value) ? value : [];
+  if (arr.length < 3) return undefined;
+  return decodeColorComponents(kind, Number(arr[0]), Number(arr[1]), Number(arr[2]));
+}
+
+export function decodeColorComponents(
+  kind: string | undefined,
+  a: number,
+  b: number,
+  c: number,
+): [number, number, number] | undefined {
+  if (![a, b, c].every((n) => Number.isFinite(n))) return undefined;
+  const k = (kind ?? "rgb").toLowerCase();
+  if (k === "hsv360") return hsvToRgb(a / 360, b / 100, c / 100);
+  if (k === "hsv") return hsvToRgb(a, b, c);
+  return [
+    Math.round(Math.min(255, Math.max(0, a))),
+    Math.round(Math.min(255, Math.max(0, b))),
+    Math.round(Math.min(255, Math.max(0, c))),
+  ];
+}
+
+/** Clausewitz `HSV { h s v }` with h,s,v in 0–1. */
+export function hsvToRgb(h: number, s: number, v: number): [number, number, number] {
+  const hh = ((h % 1) + 1) % 1;
+  const ss = Math.min(1, Math.max(0, s));
+  const vv = Math.min(1, Math.max(0, v));
+  const i = Math.floor(hh * 6);
+  const f = hh * 6 - i;
+  const p = vv * (1 - ss);
+  const q = vv * (1 - f * ss);
+  const t = vv * (1 - (1 - f) * ss);
+  const triplet = (
+    [
+      [vv, t, p],
+      [q, vv, p],
+      [p, vv, t],
+      [p, q, vv],
+      [t, p, vv],
+      [vv, p, q],
+    ] as const
+  )[i % 6]!;
+  return [Math.round(triplet[0] * 255), Math.round(triplet[1] * 255), Math.round(triplet[2] * 255)];
 }
 
 export function parseReplacePaths(descriptorText: string): string[] {

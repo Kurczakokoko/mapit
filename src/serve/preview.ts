@@ -10,15 +10,18 @@ export type Preview = {
   ids: Uint32Array;
 };
 
-export function renderPoliticalPreview(session: MapSession, maxWidth = 2048): Preview {
-  const scale = Math.min(1, maxWidth / session.width);
+/** PNG row 0 is north (high z). The IR/idGrid still uses z=0 south. */
+export function renderPoliticalPreview(session: MapSession, maxWidth = session.width): Preview {
+  const cap = Math.max(1, maxWidth);
+  const scale = Math.min(1, cap / session.width);
   const width = Math.max(1, Math.round(session.width * scale));
   const height = Math.max(1, Math.round(session.height * scale));
   const rgb = new Uint8Array(width * height * 3);
   const ids = new Uint32Array(width * height);
   const owners = ownersAfterPending(session);
   for (let z = 0; z < height; z++) {
-    const mz = Math.min(session.height - 1, Math.floor((z * session.height) / height));
+    const srcZ = Math.min(session.height - 1, Math.floor((z * session.height) / height));
+    const mz = session.height - 1 - srcZ;
     for (let x = 0; x < width; x++) {
       const mx = Math.min(session.width - 1, Math.floor((x * session.width) / width));
       const id = session.idGrid[mz * session.width + mx]!;
@@ -62,7 +65,7 @@ export function renderPoliticalPreview(session: MapSession, maxWidth = 2048): Pr
   return { width, height, scale, png, ids };
 }
 
-/** 1 = province, 2 = state, 3 = country (or land/sea). */
+/** 1 = province, 2 = state, 3 = country, 4 = land/sea coast. */
 function paintBorders(
   rgb: Uint8Array,
   ids: Uint32Array,
@@ -79,23 +82,30 @@ function paintBorders(
     if (!pa || !pb) return 0;
     const aLand = pa.type === "land";
     const bLand = pb.type === "land";
-    if (owners.get(a) !== owners.get(b) && (aLand || bLand)) return 3;
+    if (aLand !== bLand) return 4;
+    if (aLand && bLand && owners.get(a) !== owners.get(b)) return 3;
     if (aLand && bLand && (pa.stateId ?? 0) !== (pb.stateId ?? 0)) return 2;
     return 1;
   };
   const bump = (i: number, rank: number) => {
+    if ((rank === 3 || rank === 4) && mark[i] === 2) return;
     if (rank > mark[i]!) mark[i] = rank;
   };
   for (let z = 0; z < height; z++) {
     for (let x = 0; x < width; x++) {
       const i = z * width + x;
       const a = ids[i]!;
-      const check = (nx: number, nz: number) => {
+      const check = (nx0: number, nz: number) => {
         if (nz < 0 || nz >= height) return;
-        const xx = nx < 0 ? width - 1 : nx >= width ? 0 : nx;
-        const j = nz * width + xx;
+        const nx = ((nx0 % width) + width) % width;
+        const j = nz * width + nx;
         const rank = rankAt(a, ids[j]!);
         if (!rank) return;
+        if (rank === 4) {
+          if (session.provinces.get(a)?.type === "land") bump(i, 4);
+          if (session.provinces.get(ids[j]!)?.type === "land") bump(j, 4);
+          return;
+        }
         bump(i, rank);
         if (rank >= 2) bump(j, rank);
       };
@@ -109,7 +119,7 @@ function paintBorders(
     const o = i * 3;
     const p = session.provinces.get(ids[i]!);
     const water = p?.type === "sea" || p?.type === "lake";
-    if (rank === 3) {
+    if (rank === 3 || rank === 4) {
       rgb[o] = 12;
       rgb[o + 1] = 10;
       rgb[o + 2] = 14;

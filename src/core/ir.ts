@@ -51,6 +51,8 @@ export type State = {
   buildings: Record<string, number>;
   provincialBuildings: ProvincialBuilding[];
   localSupplies: number;
+  impassable?: boolean;
+  forceLinkOwnershipTo?: number;
   raw?: string;
 };
 
@@ -97,6 +99,8 @@ export type Country = {
   name: string;
   color: [number, number, number];
   file?: string;
+  /** Civil-war slot from `dynamic_tags = yes` / `generic.txt` — hide from the painter unless used. */
+  dynamic?: boolean;
 };
 
 export type Railway = { level: number; provinces: ProvinceId[] };

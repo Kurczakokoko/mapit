@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { encode as encodePng } from "fast-png";
 import { encodeBmp24, encodeBmpIndexed } from "../pdx/bmp.ts";
@@ -25,7 +26,7 @@ import type { BuildingPlacement, State, StrategicRegion } from "./ir.ts";
 import { writeLaunchKit, type KitCountry } from "./launchkit.ts";
 import { loadMap } from "./load.ts";
 import { findHoi4Install } from "./paths.ts";
-import { validate } from "./validate.ts";
+import { PROVINCE_CAP, validate } from "./validate.ts";
 
 export type GenerateOptions = {
   layersDir: string;
@@ -274,6 +275,7 @@ function fillLeftover(
   width: number,
   height: number,
   wrap: boolean,
+  group?: Int32Array,
 ): void {
   const q: number[] = [];
   for (let i = 0; i < owner.length; i++) {
@@ -294,20 +296,63 @@ function fillLeftover(
       if (nz < 0 || nz >= height || nx < 0 || nx >= width) continue;
       const ni = nz * width + nx;
       if (!mask[ni] || owner[ni] >= 0) continue;
+      if (group && group[ni] !== group[i]) continue;
       owner[ni] = owner[i]!;
       q.push(ni);
     }
   }
 }
 
-function fixX(owner: Int32Array, width: number, height: number, wrap: boolean): number {
+function fillByDonor(
+  owner: Int32Array,
+  mask: Uint8Array,
+  width: number,
+  height: number,
+  wrap: boolean,
+  group?: Int32Array,
+): void {
+  const donor = new Map<number, number>();
+  for (let i = 0; i < owner.length; i++) {
+    if (!mask[i] || owner[i]! < 0) continue;
+    const g = group ? group[i]! : 0;
+    if (!donor.has(g)) donor.set(g, owner[i]!);
+  }
+  for (let i = 0; i < owner.length; i++) {
+    if (!mask[i] || owner[i]! >= 0) continue;
+    const g = group ? group[i]! : 0;
+    const d = donor.get(g);
+    if (d === undefined) continue;
+    const q = [i];
+    owner[i] = d;
+    while (q.length) {
+      const p = q.pop()!;
+      const x = p % width;
+      const z = (p / width) | 0;
+      const neigh = [
+        [wrapX(x + 1, width, wrap), z],
+        [wrapX(x - 1, width, wrap), z],
+        [x, z + 1],
+        [x, z - 1],
+      ];
+      for (const [nx, nz] of neigh) {
+        if (nz < 0 || nz >= height || nx < 0 || nx >= width) continue;
+        const ni = nz * width + nx;
+        if (!mask[ni] || owner[ni]! >= 0) continue;
+        if (group && group[ni] !== g) continue;
+        owner[ni] = d;
+        q.push(ni);
+      }
+    }
+  }
+}
+
+function fixX(owner: Int32Array, width: number, height: number, _wrap?: boolean): number {
   let n = 0;
   for (let pass = 0; pass < 8; pass++) {
     let p = 0;
     for (let z = 0; z < height - 1; z++) {
-      const xmax = wrap ? width : width - 1;
-      for (let x = 0; x < xmax; x++) {
-        const x2 = wrapX(x + 1, width, wrap);
+      for (let x = 0; x < width; x++) {
+        const x2 = (x + 1) % width;
         const a = owner[z * width + x]!;
         const b = owner[z * width + x2]!;
         const c = owner[(z + 1) * width + x]!;
@@ -328,18 +373,17 @@ function fixX(owner: Int32Array, width: number, height: number, wrap: boolean): 
 
 function fixCrossings(
   idAt: Int32Array,
-  isLand: Uint8Array,
   width: number,
   height: number,
-  wrap: boolean,
+  kindOfPixel: (i: number) => number,
+  kindOfId: (id: number) => number,
 ): number {
   let n = 0;
   for (let pass = 0; pass < 12; pass++) {
     let p = 0;
     for (let z = 0; z < height - 1; z++) {
-      const xmax = wrap ? width : width - 1;
-      for (let x = 0; x < xmax; x++) {
-        const x2 = wrapX(x + 1, width, wrap);
+      for (let x = 0; x < width; x++) {
+        const x2 = (x + 1) % width;
         const ia = z * width + x;
         const ib = z * width + x2;
         const ic = (z + 1) * width + x;
@@ -350,9 +394,26 @@ function fixCrossings(
         const d = idAt[id]!;
         const set = new Set([a, b, c, d]);
         if (set.size !== 4) continue;
-        const wantLand = isLand[id]!;
-        idAt[id] = isLand[ib] === wantLand ? b : isLand[ia] === wantLand ? a : isLand[ic] === wantLand ? c : b;
-        p++;
+        const want = kindOfPixel(id);
+        const pick = [b, a, c].find((pid) => kindOfId(pid) === want);
+        if (pick !== undefined) {
+          idAt[id] = pick;
+          p++;
+          continue;
+        }
+        const d4 = [ia, ib, ic, id - width, id + width, id - 1, id + 1];
+        let found = false;
+        for (const ni of d4) {
+          if (ni < 0 || ni >= idAt.length) continue;
+          const pid = idAt[ni]!;
+          if (kindOfId(pid) === want) {
+            idAt[id] = pid;
+            found = true;
+            p++;
+            break;
+          }
+        }
+        if (!found) continue;
       }
     }
     n += p;
@@ -368,6 +429,7 @@ function mergeSmall(
   height: number,
   wrap: boolean,
   minPx: number,
+  group?: Int32Array,
 ): void {
   const counts = new Map<number, number>();
   for (let i = 0; i < owner.length; i++) {
@@ -380,9 +442,11 @@ function mergeSmall(
     if (!small.has(owner[i]!)) continue;
     const x = i % width;
     const z = (i / width) | 0;
+    const nxRight = wrap ? wrapX(x + 1, width, true) : x + 1;
+    const nxLeft = wrap ? wrapX(x - 1, width, true) : x - 1;
     const neigh = [
-      wrapX(x + 1, width, wrap) + z * width,
-      wrapX(x - 1, width, wrap) + z * width,
+      nxRight >= 0 && nxRight < width ? nxRight + z * width : -1,
+      nxLeft >= 0 && nxLeft < width ? nxLeft + z * width : -1,
       z + 1 < height ? i + width : -1,
       z > 0 ? i - width : -1,
     ];
@@ -391,11 +455,40 @@ function mergeSmall(
       if (ni < 0 || ni >= owner.length) continue;
       const id = owner[ni]!;
       if (id < 0 || small.has(id) || !mask[ni]) continue;
+      if (group && group[ni] !== group[i]) continue;
       best = id;
       break;
     }
     if (best >= 0) owner[i] = best;
   }
+}
+
+function adjacentChain(ids: number[], neighbors: Map<number, Set<number>>, maxLen: number): number[] {
+  const allow = new Set(ids);
+  for (const start of ids) {
+    const path = [start];
+    const used = new Set([start]);
+    while (path.length < maxLen) {
+      const cur = path[path.length - 1]!;
+      let next: number | undefined;
+      for (const n of neighbors.get(cur) ?? []) {
+        if (allow.has(n) && !used.has(n)) {
+          next = n;
+          break;
+        }
+      }
+      if (next === undefined) break;
+      used.add(next);
+      path.push(next);
+    }
+    if (path.length >= 2) return path;
+  }
+  for (const a of ids) {
+    for (const n of neighbors.get(a) ?? []) {
+      if (allow.has(n)) return [a, n];
+    }
+  }
+  return [];
 }
 
 function components(
@@ -473,20 +566,66 @@ function readCsvCities(path: string, width: number, height: number): { x: number
   if (!existsSync(path)) return [];
   const lines = readFileSync(path, "utf8").split(/\r?\n/).filter((l) => l.trim());
   const out: { x: number; z: number; name: string; pop: number; vp?: number }[] = [];
-  for (let li = 0; li < lines.length; li++) {
-    const parts = lines[li]!.split(",").map((s) => s.trim());
-    if (li === 0 && /x/i.test(parts[0] ?? "") && /z/i.test(parts[1] ?? "")) continue;
-    const nums = parts.map(Number);
-    let x = nums[0]!;
-    let z = nums[1]!;
-    if (!Number.isFinite(x) || !Number.isFinite(z)) continue;
+  if (lines.length === 0) return out;
+  const header = lines[0]!.split(",").map((s) => s.trim().toLowerCase());
+  const named = header.includes("x") || header.includes("z") || header.includes("name") || header.includes("population");
+  const nameI = header.indexOf("name");
+  const xI = header.indexOf("x");
+  const zI = header.indexOf("z");
+  const popI = header.findIndex((h) => h === "population" || h === "pop");
+  const start = named && (xI >= 0 || zI >= 0 || nameI >= 0) ? 1 : 0;
+  const parseRow = (parts: string[], fallbackName: string) => {
+    let name = fallbackName;
+    let x: number;
+    let z: number;
+    let pop = 50000;
+    if (start === 1 && xI >= 0 && zI >= 0) {
+      x = Number(parts[xI]);
+      z = Number(parts[zI]);
+      if (nameI >= 0 && parts[nameI]) name = parts[nameI]!;
+      if (popI >= 0 && Number.isFinite(Number(parts[popI]))) pop = Number(parts[popI]);
+    } else if (!Number.isFinite(Number(parts[0])) && Number.isFinite(Number(parts[1])) && Number.isFinite(Number(parts[2]))) {
+      name = parts[0] || fallbackName;
+      x = Number(parts[1]);
+      z = Number(parts[2]);
+      if (Number.isFinite(Number(parts[3]))) pop = Number(parts[3]);
+    } else {
+      x = Number(parts[0]);
+      z = Number(parts[1]);
+      const namedCol = parts.find((p, i) => i > 1 && Number.isNaN(Number(p)));
+      if (namedCol) name = namedCol;
+      const popCol = parts.map(Number).find((n, i) => i > 1 && Number.isFinite(n) && n > 20);
+      if (popCol !== undefined) pop = popCol;
+    }
+    if (!Number.isFinite(x) || !Number.isFinite(z)) return;
     if (x >= 0 && x <= 1 && z >= 0 && z <= 1) {
       x *= width - 1;
       z *= height - 1;
     }
-    const name = parts.find((p, i) => i > 1 && Number.isNaN(Number(p))) ?? `City ${out.length + 1}`;
-    const pop = parts.map(Number).find((n, i) => i > 1 && Number.isFinite(n) && n > 20) ?? 50000;
     out.push({ x: Math.round(x), z: Math.round(z), name, pop });
+  };
+  for (let li = start; li < lines.length; li++) {
+    parseRow(
+      lines[li]!.split(",").map((s) => s.trim()),
+      `City ${out.length + 1}`,
+    );
+  }
+  return out;
+}
+
+function flipGrey(data: Uint8Array, width: number, height: number): Uint8Array {
+  const out = new Uint8Array(data.length);
+  for (let z = 0; z < height; z++) {
+    out.set(data.subarray(z * width, (z + 1) * width), (height - 1 - z) * width);
+  }
+  return out;
+}
+
+function flipRgb(data: Uint8Array, width: number, height: number): Uint8Array {
+  const out = new Uint8Array(data.length);
+  const stride = width * 3;
+  for (let z = 0; z < height; z++) {
+    out.set(data.subarray(z * stride, (z + 1) * stride), (height - 1 - z) * stride);
   }
   return out;
 }
@@ -494,13 +633,13 @@ function readCsvCities(path: string, width: number, height: number): { x: number
 function greyPng(dir: string, name: string, width: number, height: number, mode: "nearest" | "bilinear"): Uint8Array | undefined {
   const img = tryLoadPng(join(dir, name));
   if (!img) return undefined;
-  return resampleGrey(img, width, height, mode);
+  return flipGrey(resampleGrey(img, width, height, mode), width, height);
 }
 
 function rgbPng(dir: string, name: string, width: number, height: number): Uint8Array | undefined {
   const img = tryLoadPng(join(dir, name));
   if (!img) return undefined;
-  return resampleRgb(img, width, height);
+  return flipRgb(resampleRgb(img, width, height), width, height);
 }
 
 function writeGreyPng(path: string, width: number, height: number, grey: Uint8Array) {
@@ -788,6 +927,7 @@ export async function generateWorld(opts: GenerateOptions): Promise<{ summary: s
       else terrainIdx[i] = TERRAIN_INDEX.plains;
     }
   }
+  const citiesIdx = new Uint8Array(width * height);
   for (const city of cities) {
     const r = Math.max(2, Math.min(8, Math.round(Math.log10(Math.max(city.pop, 1000)))));
     for (let dz = -r; dz <= r; dz++) {
@@ -797,7 +937,10 @@ export async function generateWorld(opts: GenerateOptions): Promise<{ summary: s
         const z = city.z + dz;
         if (z < 0 || z >= height || x < 0 || x >= width) continue;
         const i = z * width + x;
-        if (isLand[i]) terrainIdx[i] = TERRAIN_INDEX.urban;
+        if (isLand[i]) {
+          terrainIdx[i] = TERRAIN_INDEX.urban;
+          citiesIdx[i] = 13;
+        }
       }
     }
   }
@@ -860,8 +1003,8 @@ export async function generateWorld(opts: GenerateOptions): Promise<{ summary: s
       tag,
       name: m?.name ?? tag,
       color: m?.color ?? countryColors[i] ?? uniqueColor(i, new Set()),
-      capital: 1,
-      capitalProvince: 1,
+      capital: 0,
+      capitalProvince: 0,
     });
   }
 
@@ -912,17 +1055,14 @@ export async function generateWorld(opts: GenerateOptions): Promise<{ summary: s
     }
     for (let lab = 0; lab < covered.sizes.length; lab++) {
       if (hasSeed[lab] || (covered.sizes[lab] ?? 0) < MIN_PX) continue;
-      let sx = 0;
-      let sz = 0;
-      let cnt = 0;
+      let pick = -1;
       for (let i = 0; i < covered.label.length; i++) {
         if (covered.label[i] === lab) {
-          sx += i % width;
-          sz += (i / width) | 0;
-          cnt++;
+          pick = i;
+          break;
         }
       }
-      local.push({ x: Math.round(sx / cnt), z: Math.round(sz / cnt) });
+      if (pick >= 0) local.push({ x: pick % width, z: (pick / width) | 0 });
     }
     for (const s of local) landSeeds.push({ ...s, country: c });
   }
@@ -944,13 +1084,11 @@ export async function generateWorld(opts: GenerateOptions): Promise<{ summary: s
       return c;
     },
   });
-  fillLeftover(landOwner, landMask, width, height, wrap);
-  mergeSmall(landOwner, landMask, width, height, wrap, MIN_PX);
-  fillLeftover(landOwner, landMask, width, height, wrap);
-  for (let i = 0; i < landOwner.length; i++) {
-    if (isLand[i] && landOwner[i]! < 0) landOwner[i] = 0;
-  }
-  const xfix = fixX(landOwner, width, height, wrap);
+  fillLeftover(landOwner, landMask, width, height, wrap, countryOf);
+  mergeSmall(landOwner, landMask, width, height, wrap, MIN_PX, countryOf);
+  fillLeftover(landOwner, landMask, width, height, wrap, countryOf);
+  fillByDonor(landOwner, landMask, width, height, wrap, countryOf);
+  const xfix = fixX(landOwner, width, height);
 
   const seaMask = new Uint8Array(width * height);
   for (let i = 0; i < seaMask.length; i++) seaMask[i] = isSea[i] ? 1 : 0;
@@ -987,17 +1125,14 @@ export async function generateWorld(opts: GenerateOptions): Promise<{ summary: s
     if ((lakeComp.sizes[lab] ?? 0) < MIN_PX) continue;
     const has = lakeSeeds.some((s) => lakeComp.label[s.z * width + s.x] === lab);
     if (has) continue;
-    let sx = 0;
-    let sz = 0;
-    let cnt = 0;
+    let pick = -1;
     for (let i = 0; i < lakeComp.label.length; i++) {
       if (lakeComp.label[i] === lab) {
-        sx += i % width;
-        sz += (i / width) | 0;
-        cnt++;
+        pick = i;
+        break;
       }
     }
-    lakeSeeds.push({ x: Math.round(sx / Math.max(cnt, 1)), z: Math.round(sz / Math.max(cnt, 1)) });
+    if (pick >= 0) lakeSeeds.push({ x: pick % width, z: (pick / width) | 0 });
   }
   const lakeOwner = lakeSeeds.length
     ? grow({ width, height, mask: lakeMask, seeds: lakeSeeds, wrap, cost: () => 1 })
@@ -1057,14 +1192,37 @@ export async function generateWorld(opts: GenerateOptions): Promise<{ summary: s
     return best;
   };
 
+  const firstLand = landIdOf.find((id) => id)!;
+  const firstSea = seaIdOf.find((id) => id) ?? firstLand;
   for (let i = 0; i < idAt.length; i++) {
     let def: ProvinceDef | undefined;
-    if (isLand[i]) def = defs[(landIdOf[landOwner[i]!] ?? 1) - 1];
-    else if (isLake[i]) def = defs[(lakeIdOf[lakeOwner[i]!] ?? 1) - 1];
-    else def = defs[(seaIdOf[seaOwner[i]!] ?? 1) - 1];
-    idAt[i] = (def ?? defs[0]!).id;
+    if (isLand[i]) {
+      const s = landOwner[i]!;
+      const id = s >= 0 ? landIdOf[s] : undefined;
+      def = id ? defs[id - 1] : defs[firstLand - 1];
+    } else if (isLake[i]) {
+      const s = lakeOwner[i]!;
+      const id = s >= 0 ? lakeIdOf[s] : undefined;
+      if (id) def = defs[id - 1];
+      else {
+        const seaS = seaOwner[i]!;
+        const sid = seaS >= 0 ? seaIdOf[seaS] : firstSea;
+        def = defs[(sid ?? firstSea) - 1];
+      }
+    } else {
+      const s = seaOwner[i]!;
+      const id = s >= 0 ? seaIdOf[s] : firstSea;
+      def = defs[(id ?? firstSea) - 1];
+    }
+    idAt[i] = (def ?? defs[firstLand - 1]!).id;
   }
-  const xfixAll = fixCrossings(idAt, isLand, width, height, wrap);
+  const kindOfPixel = (i: number) => (isLand[i] ? 1 : isLake[i] ? 2 : 3);
+  const kindOfId = (id: number) => {
+    const d = defs[id - 1];
+    if (!d) return 0;
+    return d.type === "land" ? 1 : d.type === "lake" ? 2 : 3;
+  };
+  const xfixAll = fixCrossings(idAt, width, height, kindOfPixel, kindOfId);
   for (let i = 0; i < idAt.length; i++) {
     const d = defs[idAt[i]! - 1] ?? defs[0]!;
     rgb[i * 3] = d.r;
@@ -1111,6 +1269,9 @@ export async function generateWorld(opts: GenerateOptions): Promise<{ summary: s
   }
 
   const live = defs.filter((d) => (pixels.get(d.id) ?? 0) >= 1);
+  if (live.length > PROVINCE_CAP) {
+    throw new Error(`Generated ${live.length} provinces; HOI4 practical cap is ${PROVINCE_CAP}`);
+  }
   live.sort((a, b) => a.id - b.id);
   const remap = new Map<number, number>();
   live.forEach((d, i) => remap.set(d.id, i + 1));
@@ -1263,12 +1424,24 @@ export async function generateWorld(opts: GenerateOptions): Promise<{ summary: s
 
   const railways: { level: number; provinces: number[] }[] = [];
   for (const [, ids] of byCountry) {
-    if (ids.length >= 2) railways.push({ level: 1, provinces: ids.slice(0, Math.min(8, ids.length)) });
+    const chain = adjacentChain(ids, neighbors2, 8);
+    if (chain.length >= 2) railways.push({ level: 1, provinces: chain });
   }
-  if (railways.length === 0 && landLive.length >= 2) {
-    railways.push({ level: 1, provinces: [landLive[0]!.id, landLive[1]!.id] });
-  } else if (railways.length === 0) {
-    railways.push({ level: 1, provinces: [landLive[0]?.id ?? 1, landLive[0]?.id ?? 1] });
+  if (railways.length === 0) {
+    const allLand = landLive.map((d) => d.id);
+    const chain = adjacentChain(allLand, neighbors2, 8);
+    if (chain.length >= 2) {
+      railways.push({ level: 1, provinces: chain });
+    } else {
+      outer: for (const p of landLive) {
+        for (const n of neighbors2.get(p.id) ?? []) {
+          if (live.find((d) => d.id === n)?.type === "land") {
+            railways.push({ level: 1, provinces: [p.id, n] });
+            break outer;
+          }
+        }
+      }
+    }
   }
   const supply = states.map((st) => ({
     level: 1,
@@ -1365,9 +1538,15 @@ export async function generateWorld(opts: GenerateOptions): Promise<{ summary: s
   for (const st of states) {
     const tag = st.owner ?? "TAG";
     const kc = kitCountries.find((c) => c.tag === tag);
-    if (kc && kc.capital === 1 && st.id) {
+    if (kc && kc.capital === 0 && st.id) {
       kc.capital = st.id;
       kc.capitalProvince = st.victoryPoints[0]?.province ?? st.provinces[0]!;
+    }
+  }
+  for (const kc of kitCountries) {
+    if (kc.capital === 0) {
+      kc.capital = states[0]?.id ?? 1;
+      kc.capitalProvince = states[0]?.provinces[0] ?? 1;
     }
   }
 
@@ -1404,19 +1583,30 @@ export async function generateWorld(opts: GenerateOptions): Promise<{ summary: s
       normal[i + 2] = 255;
     }
   }
-  const colormap = new Uint8Array(width * height * 4);
-  for (let z = 0; z < height; z++) {
-    const srcZ = height - 1 - z;
-    for (let x = 0; x < width; x++) {
-      const idx = terrainIdx[srcZ * width + x]!;
-      const o = (z * width + x) * 4;
+  const colormap = new Uint8Array(nw * nh * 4);
+  for (let z = 0; z < nh; z++) {
+    const srcZ = height - 1 - Math.min(height - 1, Math.floor((z * height) / nh));
+    for (let x = 0; x < nw; x++) {
+      const srcX = Math.min(width - 1, Math.floor((x * width) / nw));
+      const idx = terrainIdx[srcZ * width + srcX]!;
+      const o = (z * nw + x) * 4;
       const c = TERRAIN_RGB[idx] ?? [80, 80, 80];
       colormap[o] = c[0]!;
       colormap[o + 1] = c[1]!;
       colormap[o + 2] = c[2]!;
-      colormap[o + 3] = 255;
+      colormap[o + 3] = idx === TERRAIN_INDEX.urban ? 255 : 0;
     }
   }
+  const solidDds = (w: number, h: number, rgb: [number, number, number], a = 255) => {
+    const data = new Uint8Array(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      data[i * 4] = rgb[0];
+      data[i * 4 + 1] = rgb[1];
+      data[i * 4 + 2] = rgb[2];
+      data[i * 4 + 3] = a;
+    }
+    return encodeDdsArgb(w, h, data);
+  };
 
   const weatherPositions = regions.flatMap((r) => {
     const px = r.provinces.reduce((a, p) => a + (cx.get(p) ?? 10), 0) / Math.max(r.provinces.length, 1);
@@ -1437,7 +1627,8 @@ export async function generateWorld(opts: GenerateOptions): Promise<{ summary: s
       .join("\n") +
     "\n}\n";
 
-  mkdirSync(opts.outDir, { recursive: true });
+  const reportDir = opts.outDir;
+  mkdirSync(reportDir, { recursive: true });
   const report: GenerateReport = {
     width,
     height,
@@ -1459,14 +1650,14 @@ export async function generateWorld(opts: GenerateOptions): Promise<{ summary: s
     errors: [],
     warnings: [],
   };
-  writeFileSync(join(opts.outDir, "mapit-generate-report.json"), JSON.stringify(report, null, 2));
+  writeFileSync(join(reportDir, "mapit-generate-report.json"), JSON.stringify(report, null, 2));
   writeFileSync(
-    join(opts.outDir, "preview-provinces.png"),
+    join(reportDir, "preview-provinces.png"),
     Buffer.from(encodePng({ width, height, data: rgb, channels: 3, depth: 8 })),
   );
-  writeGreyPng(join(opts.outDir, "preview-heightmap.png"), width, height, heightmap);
-  writeIndexPreview(join(opts.outDir, "preview-terrain.png"), width, height, terrainIdx, pal.terrain);
-  writeIndexPreview(join(opts.outDir, "preview-rivers.png"), width, height, rivers, pal.rivers);
+  writeGreyPng(join(reportDir, "preview-heightmap.png"), width, height, heightmap);
+  writeIndexPreview(join(reportDir, "preview-terrain.png"), width, height, terrainIdx, pal.terrain);
+  writeIndexPreview(join(reportDir, "preview-rivers.png"), width, height, rivers, pal.rivers);
   const polPrev = new Uint8Array(width * height * 3);
   for (let i = 0; i < isLand.length; i++) {
     if (!isLand[i]) {
@@ -1479,34 +1670,38 @@ export async function generateWorld(opts: GenerateOptions): Promise<{ summary: s
     polPrev[i * 3 + 2] = c.color[2];
   }
   writeFileSync(
-    join(opts.outDir, "preview-political.png"),
+    join(reportDir, "preview-political.png"),
     Buffer.from(encodePng({ width, height, data: polPrev, channels: 3, depth: 8 })),
   );
 
-  if (opts.preview) {
-    return {
-      summary: `Preview ${width}×${height}: ${report.landProvinces} land provinces, ${report.seaProvinces} sea, ${report.states} states, ${report.riverPixels} river px`,
-      report,
-    };
-  }
-
-  const mapDir = join(opts.outDir, "map");
+  const modDir = opts.preview ? mkdtempSync(join(tmpdir(), "mapit-gen-")) : reportDir;
+  const mapDir = join(modDir, "map");
   mkdirSync(join(mapDir, "strategicregions"), { recursive: true });
   mkdirSync(join(mapDir, "terrain"), { recursive: true });
-  mkdirSync(join(opts.outDir, "history/states"), { recursive: true });
+  mkdirSync(join(modDir, "history/states"), { recursive: true });
 
   writeFileSync(join(mapDir, "provinces.bmp"), encodeBmp24({ width, height, data: rgb }));
   writeFileSync(join(mapDir, "definition.csv"), writeDefinitionCsv(live));
   writeFileSync(join(mapDir, "heightmap.bmp"), encodeBmpIndexed({ width, height, indices: heightmap, palette: pal.heightmap }));
   writeFileSync(join(mapDir, "terrain.bmp"), encodeBmpIndexed({ width, height, indices: terrainIdx, palette: pal.terrain }));
   writeFileSync(join(mapDir, "rivers.bmp"), encodeBmpIndexed({ width, height, indices: rivers, palette: pal.rivers }));
-  writeFileSync(join(mapDir, "cities.bmp"), encodeBmpIndexed({ width, height, indices: terrainIdx, palette: pal.terrain }));
+  writeFileSync(join(mapDir, "cities.bmp"), encodeBmpIndexed({ width, height, indices: citiesIdx, palette: pal.terrain }));
   writeFileSync(join(mapDir, "trees.bmp"), encodeBmpIndexed({ width: treesW, height: treesH, indices: trees, palette: pal.trees }));
   writeFileSync(join(mapDir, "world_normal.bmp"), encodeBmp24({ width: nw, height: nh, data: normal }));
+  writeFileSync(join(mapDir, "terrain/colormap_rgb_cityemissivemask_a.dds"), encodeDdsArgb(nw, nh, colormap));
+  const w0 = Math.max(1, Math.floor(width / 2));
+  const h0 = Math.max(1, Math.floor(height / 2));
+  const seaBlue: [number, number, number] = [18, 52, 90];
+  writeFileSync(join(mapDir, "terrain/colormap_water_0.dds"), solidDds(w0, h0, seaBlue));
   writeFileSync(
-    join(mapDir, "terrain/colormap_rgb_cityemissivemask_a.dds"),
-    encodeDdsArgb(width, height, colormap),
+    join(mapDir, "terrain/colormap_water_1.dds"),
+    solidDds(Math.max(1, Math.floor(w0 / 2)), Math.max(1, Math.floor(h0 / 2)), seaBlue),
   );
+  writeFileSync(
+    join(mapDir, "terrain/colormap_water_2.dds"),
+    solidDds(Math.max(1, Math.floor(w0 / 4)), Math.max(1, Math.floor(h0 / 4)), seaBlue),
+  );
+  writeFileSync(join(mapDir, "terrain/fow_rgb_waterspec_a.dds"), solidDds(w0, h0, [40, 40, 40], 0));
   writeFileSync(join(mapDir, "buildings.txt"), writeBuildingsTxt(buildings));
   writeFileSync(join(mapDir, "railways.txt"), writeRailwaysTxt(railways));
   writeFileSync(join(mapDir, "supply_nodes.txt"), writeSupplyNodesTxt(supply.length ? supply : [{ level: 1, province: landLive[0]?.id ?? 1 }]));
@@ -1539,7 +1734,12 @@ height = ${height}
   writeFileSync(join(mapDir, "adjacency_rules.txt"), "");
   writeFileSync(join(mapDir, "ambient_object.txt"), "");
   writeFileSync(join(mapDir, "positions.txt"), "");
-  writeFileSync(join(mapDir, "unitstacks.txt"), "");
+  const stacks = landLive.flatMap((p) => {
+    const x = (cx.get(p.id) ?? 1).toFixed(2);
+    const z = (cz.get(p.id) ?? 1).toFixed(2);
+    return [`${p.id};0;${x};9.50;${z};0.00;0.00`, `${p.id};38;${x};9.50;${z};0.00;0.00`];
+  });
+  writeFileSync(join(mapDir, "unitstacks.txt"), stacks.join("\n") + (stacks.length ? "\n" : ""));
   writeFileSync(
     join(mapDir, "cities.txt"),
     `types_source = "map/cities.bmp"
@@ -1601,14 +1801,14 @@ autumn = {
   );
 
   for (const st of states) {
-    writeFileSync(join(opts.outDir, "history/states", st.fileName), writeStateFile(st));
+    writeFileSync(join(modDir, "history/states", st.fileName), writeStateFile(st));
   }
   for (const rg of regions) {
     writeFileSync(join(mapDir, "strategicregions", rg.fileName), writeRegionFile(rg));
   }
 
   writeLaunchKit({
-    outDir: opts.outDir,
+    outDir: modDir,
     modName: opts.name ?? manifest.name ?? "Mapit Generated",
     countries: kitCountries,
     stateNames: states.map((s) => ({ id: s.id, name: s.name })),
@@ -1616,19 +1816,35 @@ autumn = {
   });
 
   try {
-    const session = await loadMap({ mapDir: opts.outDir });
+    const session = await loadMap({ mapDir: modDir });
     const v = validate(session);
     report.errors = v.errors.map((e) => `${e.code}: ${e.message}`);
     report.warnings = v.warnings.map((e) => `${e.code}: ${e.message}`);
-    writeFileSync(join(opts.outDir, "mapit-generate-report.json"), JSON.stringify(report, null, 2));
+    writeFileSync(join(reportDir, "mapit-generate-report.json"), JSON.stringify(report, null, 2));
   } catch (err) {
     report.errors.push(err instanceof Error ? err.message : String(err));
-    writeFileSync(join(opts.outDir, "mapit-generate-report.json"), JSON.stringify(report, null, 2));
+    writeFileSync(join(reportDir, "mapit-generate-report.json"), JSON.stringify(report, null, 2));
+  }
+
+  if (opts.preview) {
+    const folder = modDir.split(/[/\\]/).filter(Boolean).pop() ?? "mapit_mod";
+    const pointer = join(modDir, "..", `${folder}.mod`);
+    rmSync(modDir, { recursive: true, force: true });
+    try {
+      rmSync(pointer, { force: true });
+    } catch {
+      /* sibling pointer may already be gone */
+    }
+    const errBit = report.errors.length ? `  (${report.errors.length} validate errors)` : "";
+    return {
+      summary: `Preview ${width}×${height}: ${report.landProvinces} land provinces, ${report.seaProvinces} sea, ${report.states} states, ${report.riverPixels} river px${errBit} → ${reportDir}`,
+      report,
+    };
   }
 
   const errBit = report.errors.length ? `  (${report.errors.length} validate errors — see mapit-generate-report.json)` : "";
   return {
-    summary: `Generated ${width}×${height}: ${report.landProvinces} land provinces, ${report.seaProvinces} sea, ${report.states} states, ${report.countries} countries, ${report.riverPixels} river px → ${opts.outDir}${errBit}`,
+    summary: `Generated ${width}×${height}: ${report.landProvinces} land provinces, ${report.seaProvinces} sea, ${report.states} states, ${report.countries} countries, ${report.riverPixels} river px → ${modDir}${errBit}`,
     report,
   };
 }

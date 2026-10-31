@@ -14,7 +14,7 @@ A directory. `manifest.json` is optional.
 | `lakes.png` | | White inland water (lakes). Otherwise inland basins not touching the map edge become lakes. |
 | `terrain.png` | | RGB snapped to the vanilla terrain.bmp index table (plains, forest, hills, desert, marsh, urban, ocean, snow, …). Else height + slope + noise. |
 | `rivers.png` | | Dark pixels on land are forced river traces. Else D4 flow accumulation, 1 px, sources (green) and joins (red). |
-| `cities.csv` | | `name,x,z,population` in map pixels (or 0–1 normalised). Paints urban terrain and victory points. |
+| `cities.csv` | | `name,x,z,population` (or `x,z,name,population`) in HOI4 map pixels, z = 0 south (or 0–1 normalised). Paints urban terrain and victory points. |
 | `cities.png` | | Bright blobs become cities. |
 | `density.png` | | Brighter = smaller provinces. |
 | `continents.png` | | Unique colours → continent ids 1–7. |
@@ -40,15 +40,17 @@ A directory. `manifest.json` is optional.
 }
 ```
 
-Width and height are rounded to multiples of 256. `wrap` is the HOI4 x-wrap (default true). For a single island that must not touch itself across the date line, set `"wrap": false`. Cropped continents that still wrap in-engine should set `"edgeBands": true` (sea columns on the left and right so land never wraps).
+Width and height are rounded to multiples of 256. `wrap` is the province-grow x-wrap (default true); the engine always wraps X when detecting X-crossings. For a single island that must not touch itself across the date line, set `"wrap": false`. Cropped continents that still wrap in-engine should set `"edgeBands": true` (sea columns on the left and right so land never wraps).
 
-`--preview` writes `mapit-generate-report.json` and `preview-*.png` without a mod. `--seed`, `--name`, `--game` override the manifest / palette source.
+Layer PNGs are **north-up** (top of the image is high z / north in HOI4). `cities.csv` uses HOI4 coordinates (z = 0 south).
+
+`--preview` writes `mapit-generate-report.json` and `preview-*.png` without keeping a mod; `--out` is optional. The preview still generates a temp mod, validates it, and copies errors into the report. `--seed`, `--name`, `--game` override the manifest / palette source.
 
 ## What is written
 
-**Map:** `provinces.bmp` (24-bit), `definition.csv`, `heightmap.bmp`, `terrain.bmp`, `rivers.bmp`, `trees.bmp`, `world_normal.bmp` (half res, flat = 128,128,255), `cities.bmp`, `map/terrain/colormap_rgb_cityemissivemask_a.dds`, `buildings.txt`, `railways.txt`, `supply_nodes.txt`, `adjacencies.csv` (always with the `-1` terminator), `weatherpositions.txt` (small + big), `continent.txt`, `default.map`, `cities.txt`, `seasons.txt`, `strategicregions/*.txt` with 12 weather periods.
+**Map:** `provinces.bmp` (24-bit), `definition.csv`, `heightmap.bmp`, `terrain.bmp`, `rivers.bmp`, `trees.bmp`, `world_normal.bmp` (half res, flat = 128,128,255), `cities.bmp` (city mask, index 13), `map/terrain/colormap_rgb_cityemissivemask_a.dds` (half res), `colormap_water_0/1/2.dds`, `buildings.txt`, `railways.txt` (adjacent land chains), `supply_nodes.txt`, `adjacencies.csv` (always with the `-1` terminator), `weatherpositions.txt` (small + big), `unitstacks.txt`, `continent.txt`, `default.map`, `cities.txt`, `seasons.txt`, `strategicregions/*.txt` with 12 weather periods.
 
-**History / launch kit:** `history/states`, `history/countries`, `history/units` (one infantry division per tag), `common/country_tags`, `common/countries`, `common/bookmarks`, `common/national_focus` (one generic tree), `events/mapit.txt`, `gfx/flags/*.tga`, localisation, `descriptor.mod` with `replace_path` so vanilla states/tags/bookmarks/focuses/events are not mixed in.
+**History / launch kit:** `history/states`, `history/countries` (with a dated `1939.1.1` oob block), `history/units` (1936 and 1939 copies, one infantry division per tag), `common/country_tags` (including `zz_dynamic_countries.txt` D01–D50), `common/countries`, `common/bookmarks` (1936 Gathering Storm and 1939 Blitzkrieg), `common/national_focus` (one generic tree), `events/mapit.txt` (overlay, no `replace_path` on events), 32-bit TGA flags, localisation, `descriptor.mod` plus a **sibling** `../<folder>.mod` pointer so the HOI4 launcher sees the mod.
 
 After writing, Mapit loads the mod and runs the validator; errors land in `mapit-generate-report.json`.
 

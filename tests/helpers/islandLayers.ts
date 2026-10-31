@@ -34,17 +34,28 @@ export function writeIslandLayers(dir: string): string {
       }
     }
   }
+  const flipGrey = (src: Uint8Array) => {
+    const out = new Uint8Array(src.length);
+    for (let z = 0; z < height; z++) out.set(src.subarray(z * width, (z + 1) * width), (height - 1 - z) * width);
+    return out;
+  };
+  const flipRgb = (src: Uint8Array) => {
+    const out = new Uint8Array(src.length);
+    const stride = width * 3;
+    for (let z = 0; z < height; z++) out.set(src.subarray(z * stride, (z + 1) * stride), (height - 1 - z) * stride);
+    return out;
+  };
   writeFileSync(
     join(dir, "heightmap.png"),
-    Buffer.from(encodePng({ width, height, data: heightmap, channels: 1, depth: 8 })),
+    Buffer.from(encodePng({ width, height, data: flipGrey(heightmap), channels: 1, depth: 8 })),
   );
   writeFileSync(
     join(dir, "landmask.png"),
-    Buffer.from(encodePng({ width, height, data: landmask, channels: 1, depth: 8 })),
+    Buffer.from(encodePng({ width, height, data: flipGrey(landmask), channels: 1, depth: 8 })),
   );
   writeFileSync(
     join(dir, "political.png"),
-    Buffer.from(encodePng({ width, height, data: political, channels: 3, depth: 8 })),
+    Buffer.from(encodePng({ width, height, data: flipRgb(political), channels: 3, depth: 8 })),
   );
   writeFileSync(
     join(dir, "cities.csv"),

@@ -4,8 +4,10 @@ coverage
 *.log
 .env
 .mapit
+mapit.json
 .DS_Store
 test-output
 .idea
 .vscode
+.grok
 *.tsbuildinfo

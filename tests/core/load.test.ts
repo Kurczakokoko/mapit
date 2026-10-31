@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -21,5 +21,24 @@ describe("loadMap + validate on a synthetic overhaul", () => {
     expect(session.countries.get("SPR")?.name).toBe("Spain");
     const result = validate(session);
     expect(result.errors.map((e) => e.code)).toEqual([]);
+  });
+
+  it("uses colors.txt for the political map over the country-file color", async () => {
+    const root = writeTinyWorld(mkdtempSync(join(tmpdir(), "mapit-colors-")));
+    writeFileSync(
+      join(root, "common/countries/colors.txt"),
+      `SPR = {
+	color = rgb { 10 20 30 }
+	color_ui = rgb { 255 0 0 }
+}
+POR = {
+	color = HSV { 0.1 0.15 0.4 }
+}
+`,
+    );
+    const session = await loadMap({ mapDir: root });
+    expect(session.countries.get("SPR")?.color).toEqual([10, 20, 30]);
+    expect(session.countries.get("POR")?.color).toEqual([102, 96, 87]);
+    expect(session.countries.get("SPA")?.color).toEqual([180, 40, 40]);
   });
 });

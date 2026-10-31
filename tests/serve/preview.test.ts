@@ -22,14 +22,18 @@ describe("political preview borders", () => {
     const w = img.width;
     const data = img.data;
 
-    const interior = rgbAt(data, ch, w, 40, 10);
+    const pngZ = (iz: number) => img.height - 1 - iz;
+    // z=0 is south in the IR; PNG row 0 is north. tinyWorld sea is at high z.
+    expect(rgbAt(data, ch, w, 40, 0)).toEqual([18, 42, 64]);
+    expect(rgbAt(data, ch, w, 40, img.height - 1)).toEqual([242, 205, 94]);
+    const interior = rgbAt(data, ch, w, 40, pngZ(10));
     expect(interior).toEqual([242, 205, 94]);
 
-    const provinceEdge = rgbAt(data, ch, w, 84, 10);
+    const provinceEdge = rgbAt(data, ch, w, 84, pngZ(10));
     expect(provinceEdge[0]).toBeLessThan(40);
     expect(provinceEdge[1]).toBeLessThan(40);
 
-    const countryEdge = rgbAt(data, ch, w, 169, 10);
+    const countryEdge = rgbAt(data, ch, w, 169, pngZ(10));
     const isGold = countryEdge[0] > 180 && countryEdge[1] > 160 && countryEdge[2] < 180;
     const isBlack = countryEdge[0] < 40 && countryEdge[1] < 40 && countryEdge[2] < 40;
     expect(isGold || isBlack).toBe(true);

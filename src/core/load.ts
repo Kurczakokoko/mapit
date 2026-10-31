@@ -1,10 +1,11 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { decodeBmp } from "../pdx/bmp.ts";
 import { parseDefinitionCsv } from "../pdx/definition.ts";
 import {
   parseAdjacenciesCsv,
   parseBuildingsTxt,
+  parseColorsTxt,
   parseContinents,
   parseCountryColor,
   parseCountryTags,
@@ -77,7 +78,7 @@ export async function loadMap(opts: LoadOptions): Promise<MapSession> {
   const countries = new Map<Tag, Country>();
   for (const tagFile of resolver.resolveDir("common/country_tags")) {
     if (!tagFile.endsWith(".txt")) continue;
-    for (const { tag, file } of parseCountryTags(readFileSync(tagFile, "utf8"))) {
+    for (const { tag, file, dynamic } of parseCountryTags(readFileSync(tagFile, "utf8"))) {
       const countryPath = resolver.resolve(join("common", file)) ??
         resolver.resolve(`common/countries/${basename(file)}`);
       const color = countryPath
@@ -88,8 +89,14 @@ export async function loadMap(opts: LoadOptions): Promise<MapSession> {
         name: tag,
         color: color ?? hashColor(tag),
         file,
+        dynamic,
       });
     }
+  }
+  const palette = await loadPoliticalColors(resolver);
+  for (const [tag, color] of palette) {
+    const country = countries.get(tag);
+    if (country) country.color = color;
   }
   for (const hist of resolver.resolveDir("history/countries")) {
     if (!hist.endsWith(".txt")) continue;
@@ -137,6 +144,24 @@ export async function loadMap(opts: LoadOptions): Promise<MapSession> {
       replacePaths: resolver.replacePaths,
     },
   };
+}
+
+async function loadPoliticalColors(resolver: FileResolver): Promise<Map<Tag, [number, number, number]>> {
+  const out = new Map<Tag, [number, number, number]>();
+  const absorb = async (root: string | undefined) => {
+    if (!root) return;
+    const path = join(root, "common/countries/colors.txt");
+    if (!existsSync(path)) return;
+    for (const [tag, color] of await parseColorsTxt(readFileSync(path, "utf8"))) {
+      out.set(tag, color);
+    }
+  };
+  const replaced = resolver.replacePaths.some(
+    (rp) => rp === "common/countries" || rp === "common/countries/colors.txt",
+  );
+  if (!replaced) await absorb(resolver.gamePath);
+  await absorb(resolver.modPath);
+  return out;
 }
 
 function hashColor(tag: string): [number, number, number] {

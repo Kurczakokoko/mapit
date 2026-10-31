@@ -16,6 +16,7 @@
     "build": "tsc -p tsconfig.build.json",
     "mapit": "tsx src/cli/index.ts"
   },
+  "packageManager": "pnpm@11.8.0",
   "engines": {
     "node": ">=22"
   },

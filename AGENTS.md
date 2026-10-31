@@ -19,7 +19,7 @@ pnpm mapit atlas SPR --out ./atlas
 # or: state:41 | region:10 | bbox:x,z,w,h | front:TAG1,TAG2 | world
 ```
 
-`atlas/atlas.json` lists province `id`, `owner`, `state`, `terrain`, `coastal`, `vp`, `buildings`, `neighbors`, `centroid`. SVG/HTML label those IDs on the land.
+`atlas/atlas.json` lists province `id`, `owner`, `state`, `terrain`, `coastal`, `vp`, `buildings`, `cores`, `claims`, `neighbors`, `centroid`. SVG/HTML label those IDs on the land. The painter hides unused `dynamic_tags` slots (D01–D50).
 
 ## Change ownership
 
@@ -30,19 +30,21 @@ pnpm mapit paint owner SPA --provinces 12,15,18 --mod "$MAPIT_MOD"
 pnpm mapit validate --mod "$MAPIT_MOD"
 ```
 
-The web UI (`mapit serve --mod PATH`) keeps paints pending until Apply. The CLI applies immediately.
+The web UI (`mapit serve --mod PATH`) keeps paints pending until Apply. The CLI applies immediately. The painter is north-up (PNG y=0 is high z). Wheel zooms, Space/MMB pans. Political colours come from `common/countries/colors.txt` (`color = rgb { }` / `HSV { }`), which is what the in-game map uses.
 
 ## Generate a new world
 
 Put layers in a folder (see `docs/generate.md`). Minimum one of `heightmap.png`, `landmask.png`, `political.png`.
 
 ```bash
-pnpm mapit generate ./layers --out ./my_mod --preview
+pnpm mapit generate ./layers --preview --out ./my_mod
 # read my_mod/mapit-generate-report.json and preview-*.png
 pnpm mapit generate ./layers --out ./my_mod
 pnpm mapit inspect --mod ./my_mod --json
 pnpm mapit validate --mod ./my_mod
 ```
+
+`--preview` still runs the validator into the report. `--out` is optional only with `--preview`. Paint layers `owner|controller|core|claim`; CLI writes immediately unless `--no-apply`. `validate --fix` needs `--mod` and writes `definition.csv` + `buildings.txt`.
 
 The generator writes every layer the engine needs to boot: provinces, heightmap, terrain, rivers (1 px, sources + joins), trees, world_normal, cities, colormap, states, strategic regions, railways, supply, buildings (naval bases point at a sea province), adjacencies terminator, weather small+big, launch kit (tags, flags, bookmark, `replace_path`).
 
@@ -50,7 +52,7 @@ The generator writes every layer the engine needs to boot: provinces, heightmap,
 
 Empty `buildings.txt` / `railways.txt` / `supply_nodes.txt` crash. Missing `-1` adjacency terminator crashes. Province ID gaps crash. X-crossings crash. Naval bases need a sea province column. `weatherpositions.txt` needs both `small` and `big` (vanilla) objects. Map sides must be multiples of 256. Pixel budget ≈ 13.2e6. ~21k province cap. Definition `coastal` must match land–sea adjacency, including wrap.
 
-Coords: x east, z = 0 south. BMPs are bottom-up. Internal rasters match that.
+Coords: x east, z = 0 south. BMPs are bottom-up. Internal rasters match that. Author layer PNGs are north-up (top of the image is high z). `cities.csv` uses HOI4 coords (z = 0 south).
 
 ## Do not
 

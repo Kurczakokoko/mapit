@@ -52,3 +52,28 @@ export function provinceRing(session: MapSession, id: ProvinceId): Ring | undefi
   }
   return ring;
 }
+
+/** Split a ring wherever it jumps across the date line so SVG paths do not slash the map. */
+export function splitWrapRing(ring: Ring, width: number): Ring[] {
+  if (ring.length < 2) return ring.length ? [ring] : [];
+  const parts: Ring[] = [];
+  let cur: Ring = [ring[0]!];
+  for (let i = 1; i < ring.length; i++) {
+    const prev = ring[i - 1]!;
+    const pt = ring[i]!;
+    if (Math.abs(pt.x - prev.x) > width / 2) {
+      if (cur.length > 1) parts.push(cur);
+      cur = [pt];
+    } else {
+      cur.push(pt);
+    }
+  }
+  if (cur.length > 1) parts.push(cur);
+  return parts;
+}
+
+export function provinceRings(session: MapSession, id: ProvinceId): Ring[] {
+  const ring = provinceRing(session, id);
+  if (!ring) return [];
+  return splitWrapRing(ring, session.width);
+}

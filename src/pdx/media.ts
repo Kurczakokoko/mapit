@@ -82,25 +82,30 @@ export function resampleRgb(
   return out;
 }
 
-export function encodeTga24(width: number, height: number, rgb: Uint8Array): Buffer {
-  const buf = Buffer.alloc(18 + width * height * 3);
+/** Uncompressed 32-bit TGA, BGRA, bottom-left origin, opaque alpha (vanilla 1.19 flags). */
+export function encodeTga32(width: number, height: number, rgb: Uint8Array): Buffer {
+  const buf = Buffer.alloc(18 + width * height * 4);
   buf[2] = 2;
   buf.writeUInt16LE(width, 12);
   buf.writeUInt16LE(height, 14);
-  buf[16] = 24;
-  buf[17] = 32;
+  buf[16] = 32;
+  buf[17] = 8;
   for (let z = 0; z < height; z++) {
-    const destRow = 18 + z * width * 3;
-    const srcZ = height - 1 - z;
+    const destRow = 18 + z * width * 4;
     for (let x = 0; x < width; x++) {
-      const src = (srcZ * width + x) * 3;
-      const d = destRow + x * 3;
+      const src = (z * width + x) * 3;
+      const d = destRow + x * 4;
       buf[d] = rgb[src + 2]!;
       buf[d + 1] = rgb[src + 1]!;
       buf[d + 2] = rgb[src]!;
+      buf[d + 3] = 255;
     }
   }
   return buf;
+}
+
+export function encodeTga24(width: number, height: number, rgb: Uint8Array): Buffer {
+  return encodeTga32(width, height, rgb);
 }
 
 export function solidTga(width: number, height: number, rgb: [number, number, number]): Buffer {
@@ -110,7 +115,7 @@ export function solidTga(width: number, height: number, rgb: [number, number, nu
     data[i * 3 + 1] = rgb[1];
     data[i * 3 + 2] = rgb[2];
   }
-  return encodeTga24(width, height, data);
+  return encodeTga32(width, height, data);
 }
 
 /** Uncompressed A8R8G8B8 DDS, no mipmaps (HOI4 colormap). First row is north (high z). */

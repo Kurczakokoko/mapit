@@ -21,7 +21,19 @@ export function ownersAfterPending(session: MapSession): Map<ProvinceId, Tag> {
   return owners;
 }
 
+function scaleRecord(src: Record<string, number>, num: number, den: number): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (den <= 0) return { ...src };
+  for (const [k, v] of Object.entries(src)) {
+    const n = Math.round((v * num) / den);
+    if (n > 0) out[k] = n;
+  }
+  return out;
+}
+
 export function splitStatesForOwners(session: MapSession, owners: Map<ProvinceId, Tag>): State[] {
+  const vpSnap = [...session.states.values()].flatMap((s) => s.victoryPoints.map((vp) => ({ ...vp })));
+  const pbSnap = [...session.states.values()].flatMap((s) => s.provincialBuildings.map((b) => ({ ...b })));
   const created: State[] = [];
   let nextId = Math.max(0, ...session.states.keys()) + 1;
   for (const st of [...session.states.values()]) {
@@ -43,12 +55,17 @@ export function splitStatesForOwners(session: MapSession, owners: Map<ProvinceId
     }
     const ordered = [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
     const keep = ordered[0]!;
+    const origCount = st.provinces.length;
+    const origManpower = st.manpower;
+    const origRes = { ...st.resources };
+    const origBuildings = { ...st.buildings };
     st.provinces = keep[1];
     st.owner = keep[0];
     st.controller = keep[0];
     st.cores = [...new Set([...st.cores, keep[0]])];
-    st.victoryPoints = st.victoryPoints.filter((vp) => keep[1].includes(vp.province));
-    st.provincialBuildings = st.provincialBuildings.filter((b) => keep[1].includes(b.province));
+    st.manpower = Math.max(1, Math.round((origManpower * keep[1].length) / origCount));
+    st.resources = scaleRecord(origRes, keep[1].length, origCount);
+    st.buildings = scaleRecord(origBuildings, keep[1].length, origCount);
     for (const pid of keep[1]) {
       const p = session.provinces.get(pid);
       if (p) p.stateId = st.id;
@@ -62,18 +79,17 @@ export function splitStatesForOwners(session: MapSession, owners: Map<ProvinceId
         owner: tag,
         controller: tag,
         cores: [tag],
-        claims: [],
+        claims: [...st.claims],
         category: st.category,
-        manpower: Math.max(1, Math.round(st.manpower * (ids.length / (st.provinces.length + ids.length)))),
-        resources: {},
-        victoryPoints: st.victoryPoints.filter((vp) => ids.includes(vp.province)),
-        buildings: { ...st.buildings },
-        provincialBuildings: st.provincialBuildings.filter((b) => ids.includes(b.province)),
+        manpower: Math.max(1, origManpower - st.manpower),
+        resources: scaleRecord(origRes, ids.length, origCount),
+        victoryPoints: [],
+        buildings: scaleRecord(origBuildings, ids.length, origCount),
+        provincialBuildings: [],
         localSupplies: st.localSupplies,
+        impassable: st.impassable,
+        forceLinkOwnershipTo: st.forceLinkOwnershipTo,
       };
-      // victory points were already filtered onto keep — pull from original list via session
-      neu.victoryPoints = [];
-      neu.provincialBuildings = [];
       for (const pid of ids) {
         const p = session.provinces.get(pid);
         if (p) p.stateId = neu.id;
@@ -82,17 +98,22 @@ export function splitStatesForOwners(session: MapSession, owners: Map<ProvinceId
       created.push(neu);
       nextId++;
     }
-    // restore VPs/buildings from the pre-split copies on provinces via pending owners only
   }
-  // Second pass: move VPs that belong to new states. Re-read from all states is messy;
-  // gather from every state then assign by current province.stateId.
-  const allVp = [...session.states.values()].flatMap((s) => s.victoryPoints.map((vp) => ({ ...vp })));
-  const allPb = [...session.states.values()].flatMap((s) => s.provincialBuildings.map((b) => ({ ...b })));
   for (const s of session.states.values()) {
-    s.victoryPoints = allVp.filter((vp) => session.provinces.get(vp.province)?.stateId === s.id);
-    s.provincialBuildings = allPb.filter((b) => session.provinces.get(b.province)?.stateId === s.id);
+    s.victoryPoints = vpSnap.filter((vp) => session.provinces.get(vp.province)?.stateId === s.id);
+    s.provincialBuildings = pbSnap.filter((b) => session.provinces.get(b.province)?.stateId === s.id);
   }
   return created;
+}
+
+export function rehomeBuildings(session: MapSession): void {
+  for (const b of session.buildings) {
+    const x = Math.max(0, Math.min(session.width - 1, Math.round(b.x)));
+    const z = Math.max(0, Math.min(session.height - 1, Math.round(b.z)));
+    const pid = session.idGrid[z * session.width + x]!;
+    const p = session.provinces.get(pid);
+    if (p?.stateId !== undefined) b.state = p.stateId;
+  }
 }
 
 export function fixNavalBases(session: MapSession): number {
@@ -147,15 +168,30 @@ export function autoFixCoastal(session: MapSession): number {
 }
 
 export function applyPending(session: MapSession, modPath: string): { createdStates: number; wrote: string[] } {
+  const pending = [...session.pending];
   const owners = ownersAfterPending(session);
   const priorStates = new Set<number>();
-  for (const op of session.pending) {
+  for (const op of pending) {
     for (const pid of op.provinces) {
       const sid = session.provinces.get(pid)?.stateId;
       if (sid !== undefined) priorStates.add(sid);
     }
   }
   const created = splitStatesForOwners(session, owners);
+  for (const op of pending) {
+    if (op.layer === "owner") continue;
+    for (const pid of op.provinces) {
+      const sid = session.provinces.get(pid)?.stateId;
+      if (sid === undefined) continue;
+      const st = session.states.get(sid);
+      if (!st) continue;
+      priorStates.add(sid);
+      if (op.layer === "controller") st.controller = op.brush;
+      if (op.layer === "core" && !st.cores.includes(op.brush)) st.cores.push(op.brush);
+      if (op.layer === "claim" && !st.claims.includes(op.brush)) st.claims.push(op.brush);
+    }
+  }
+  rehomeBuildings(session);
   fixNavalBases(session);
   const wrote: string[] = [];
   const statesDir = join(modPath, "history/states");

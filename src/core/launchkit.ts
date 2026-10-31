@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { solidTga } from "../pdx/media.ts";
 
 export type KitCountry = {
@@ -32,6 +32,18 @@ export function writeLaunchKit(opts: {
 
   const tagLines = countries.map((c) => `${c.tag} = "countries/${c.tag}.txt"`).join("\n") + "\n";
   writeFileSync(join(outDir, "common/country_tags/00_countries.txt"), tagLines);
+  const dyn: string[] = ["dynamic_tags = yes"];
+  for (let i = 1; i <= 50; i++) {
+    dyn.push(`D${String(i).padStart(2, "0")} = "countries/generic.txt"`);
+  }
+  writeFileSync(join(outDir, "common/country_tags/zz_dynamic_countries.txt"), dyn.join("\n") + "\n");
+  writeFileSync(
+    join(outDir, "common/countries/generic.txt"),
+    `graphical_culture = western_european_gfx
+graphical_culture_2d = western_european_2d
+color = { 80 80 80 }
+`,
+  );
 
   const colorsTxt = countries
     .map(
@@ -70,11 +82,12 @@ set_popularities = {
 	communism = 10
 	neutrality = 70
 }
+1939.1.1 = {
+	oob = "${c.tag}_1939"
+}
 `,
     );
-    writeFileSync(
-      join(outDir, `history/units/${c.tag}_1936.txt`),
-      `division_template = {
+    const oob = `division_template = {
 	name = "Infantry Division"
 	regiments = {
 		infantry = { x = 0 y = 0 }
@@ -91,8 +104,9 @@ units = {
 		start_experience_factor = 0.1
 	}
 }
-`,
-    );
+`;
+    writeFileSync(join(outDir, `history/units/${c.tag}_1936.txt`), oob);
+    writeFileSync(join(outDir, `history/units/${c.tag}_1939.txt`), oob);
     writeFileSync(join(outDir, `gfx/flags/${c.tag}.tga`), solidTga(82, 52, c.color));
     writeFileSync(join(outDir, `gfx/flags/medium/${c.tag}.tga`), solidTga(41, 26, c.color));
     writeFileSync(join(outDir, `gfx/flags/small/${c.tag}.tga`), solidTga(10, 7, c.color));
@@ -121,6 +135,26 @@ units = {
 ${bookmarkCountries}
 		"---" = {
 			history = "OTHER_GATHERING_STORM_DESC"
+		}
+		effect = {
+			randomize_weather = 22345
+		}
+	}
+}
+`,
+  );
+  writeFileSync(
+    join(outDir, "common/bookmarks/blitzkrieg.txt"),
+    `bookmarks = {
+	bookmark = {
+		name = "MAPIT_BLITZKRIEG"
+		desc = "MAPIT_BLITZKRIEG_DESC"
+		date = 1939.8.14.12
+		picture = "GFX_select_date_1939"
+		default_country = "${defaultTag}"
+${bookmarkCountries.replaceAll("_GATHERING_STORM_DESC", "_BLITZKRIEG_DESC")}
+		"---" = {
+			history = "OTHER_BLITZKRIEG_DESC"
 		}
 		effect = {
 			randomize_weather = 22345
@@ -165,13 +199,15 @@ ${focusCountries}
   const locTags = countries
     .map(
       (c) =>
-        ` ${c.tag}:0 "${escapeYml(c.name)}"\n ${c.tag}_DEF:0 "${escapeYml(c.name)}"\n ${c.tag}_ADJ:0 "${escapeYml(c.name)}"\n ${c.tag}_GATHERING_STORM_DESC:0 "${escapeYml(c.name)} in 1936."`,
+        ` ${c.tag}:0 "${escapeYml(c.name)}"\n ${c.tag}_DEF:0 "${escapeYml(c.name)}"\n ${c.tag}_ADJ:0 "${escapeYml(c.name)}"\n ${c.tag}_GATHERING_STORM_DESC:0 "${escapeYml(c.name)} in 1936."\n ${c.tag}_BLITZKRIEG_DESC:0 "${escapeYml(c.name)} in 1939."`,
     )
     .join("\n");
   const yml =
     "\ufeffl_english:\n MAPIT_GATHERING_STORM:0 \"" +
     escapeYml(opts.modName) +
-    "\"\n MAPIT_GATHERING_STORM_DESC:0 \"A Mapit-generated world.\"\n MAPIT_develop_capital:0 \"Develop Capital\"\n MAPIT_develop_capital_desc:0 \"Expand the capital's workshops.\"\n" +
+    "\"\n MAPIT_GATHERING_STORM_DESC:0 \"A Mapit-generated world.\"\n MAPIT_BLITZKRIEG:0 \"" +
+    escapeYml(opts.modName) +
+    " 1939\"\n MAPIT_BLITZKRIEG_DESC:0 \"The same world, three years later.\"\n MAPIT_develop_capital:0 \"Develop Capital\"\n MAPIT_develop_capital_desc:0 \"Expand the capital's workshops.\"\n" +
     locTags +
     "\n" +
     locStates +
@@ -180,7 +216,7 @@ ${focusCountries}
     "\n";
   writeFileSync(join(outDir, "localisation/english/mapit_l_english.yml"), yml);
 
-  const folder = outDir.split(/[/\\]/).pop() ?? "mapit_mod";
+  const folder = basename(outDir.replace(/[/\\]+$/, "")) || "mapit_mod";
   const descriptor = `name="${opts.modName}"
 path="mod/${folder}"
 supported_version="${opts.supportedVersion ?? "1.19.*"}"
@@ -191,10 +227,9 @@ replace_path="map/strategicregions"
 replace_path="common/country_tags"
 replace_path="common/bookmarks"
 replace_path="common/national_focus"
-replace_path="events"
 `;
   writeFileSync(join(outDir, "descriptor.mod"), descriptor);
-  writeFileSync(join(outDir, `${folder}.mod`), descriptor);
+  writeFileSync(join(dirname(outDir), `${folder}.mod`), descriptor);
 }
 
 function escapeYml(s: string): string {

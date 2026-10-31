@@ -98,6 +98,9 @@ export async function parseStateFile(fileName: string, text: string): Promise<St
     buildings,
     provincialBuildings,
     localSupplies: asNumber(body.local_supplies),
+    impassable: body.impassable === "yes" || body.impassable === true || asNumber(body.impassable) === 1,
+    forceLinkOwnershipTo:
+      body.force_link_ownership_to !== undefined ? asNumber(body.force_link_ownership_to) : undefined,
     raw: text,
   };
 }
@@ -133,7 +136,7 @@ export function writeStateFile(state: State): string {
   return `state={
 	id=${state.id}
 	name="${state.name}"
-${resources ? `\tresources={\n${resources}\n\t}\n` : ""}
+${resources ? `\tresources={\n${resources}\n\t}\n` : ""}${state.impassable ? "\timpassable = yes\n" : ""}${state.forceLinkOwnershipTo !== undefined ? `\tforce_link_ownership_to = ${state.forceLinkOwnershipTo}\n` : ""}
 	history={
 ${state.owner ? `\t\towner = ${state.owner}\n` : ""}${controller}${vps ? vps + "\n" : ""}\t\tbuildings = {
 ${stateB}${stateB && provB ? "\n" : ""}${provB}

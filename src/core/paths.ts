@@ -31,18 +31,59 @@ export function readConfig(cwd = process.cwd()): MapitConfig {
   };
 }
 
+export function parseSteamLibraryPaths(vdf: string): string[] {
+  const out: string[] = [];
+  const re = /"path"\s+"([^"]+)"/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(vdf))) {
+    out.push(m[1]!.replace(/\\\\/g, "\\"));
+  }
+  return out;
+}
+
+function isHoi4Root(dir: string): boolean {
+  return existsSync(join(dir, "map", "provinces.bmp"));
+}
+
+function steamVdfCandidates(): string[] {
+  const home = homedir();
+  const pf86 = process.env["PROGRAMFILES(X86)"] ?? "C:\\Program Files (x86)";
+  return [
+    join(home, ".local/share/Steam/steamapps/libraryfolders.vdf"),
+    join(home, ".steam/steam/steamapps/libraryfolders.vdf"),
+    join(home, ".steam/root/steamapps/libraryfolders.vdf"),
+    join(home, "Library/Application Support/Steam/steamapps/libraryfolders.vdf"),
+    join(pf86, "Steam/steamapps/libraryfolders.vdf"),
+  ];
+}
+
 export function findHoi4Install(): string | undefined {
   const env = process.env.MAPIT_GAME ?? process.env.HOI4_PATH;
-  if (env && existsSync(join(env, "map", "provinces.bmp"))) return env;
+  if (env && isHoi4Root(env)) return env;
   const home = homedir();
-  const candidates = [
+  const pf86 = process.env["PROGRAMFILES(X86)"] ?? "C:\\Program Files (x86)";
+  const pf = process.env.PROGRAMFILES ?? "C:\\Program Files";
+  const candidates: string[] = [
     join(home, ".local/share/Steam/steamapps/common/Hearts of Iron IV"),
     join(home, ".steam/steam/steamapps/common/Hearts of Iron IV"),
     join(home, ".steam/root/steamapps/common/Hearts of Iron IV"),
-    "/run/media/cel/b526da1c-558e-443e-bbe7-5a5c8397c8ae/SteamLibrary/steamapps/common/Hearts of Iron IV",
+    join(home, "Library/Application Support/Steam/steamapps/common/Hearts of Iron IV"),
+    join(pf86, "Steam/steamapps/common/Hearts of Iron IV"),
+    join(pf, "Paradox Interactive/Hearts of Iron IV"),
+    join(pf86, "Paradox Interactive/Hearts of Iron IV"),
   ];
+  for (const vdf of steamVdfCandidates()) {
+    if (!existsSync(vdf)) continue;
+    try {
+      for (const lib of parseSteamLibraryPaths(readFileSync(vdf, "utf8"))) {
+        candidates.push(join(lib, "steamapps/common/Hearts of Iron IV"));
+      }
+    } catch {
+      /* ignore unreadable vdf */
+    }
+  }
   for (const c of candidates) {
-    if (existsSync(join(c, "map", "provinces.bmp"))) return c;
+    if (isHoi4Root(c)) return c;
   }
   return undefined;
 }

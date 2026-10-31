@@ -1,8 +1,11 @@
 import { findProvinceIdGaps, packRgb } from "../pdx/definition.ts";
 import { bboxSize, type Diagnostic, type MapSession } from "./ir.ts";
+import { ownersAfterPending } from "./paint.ts";
 
 const PIXEL_BUDGET = 13_238_272;
 const MIN_PROVINCE_PIXELS = 8;
+export const PROVINCE_CAP = 21_000;
+export const PROVINCE_HARD_CAP = 65_535;
 
 export type ValidateResult = {
   errors: Diagnostic[];
@@ -44,6 +47,19 @@ export function validate(session: MapSession): ValidateResult {
     error({
       code: "ID_GAP",
       message: `Province ID gaps (${gaps.length}): ${gaps.slice(0, 12).join(", ")}${gaps.length > 12 ? "…" : ""}`,
+    });
+  }
+
+  const liveCount = [...session.provinces.values()].filter((p) => p.id > 0).length;
+  if (liveCount > PROVINCE_HARD_CAP) {
+    error({
+      code: "PROVINCE_CAP",
+      message: `${liveCount} provinces exceeds the engine hard cap (~${PROVINCE_HARD_CAP})`,
+    });
+  } else if (liveCount > PROVINCE_CAP) {
+    error({
+      code: "PROVINCE_CAP",
+      message: `${liveCount} provinces exceeds the practical cap (~${PROVINCE_CAP})`,
     });
   }
 
@@ -162,12 +178,19 @@ export function validate(session: MapSession): ValidateResult {
         state: state.id,
       });
     }
-    const owners = new Set<string>();
-    if (state.owner) owners.add(state.owner);
-    if (owners.size > 1) {
-      error({
+  }
+
+  const pendingOwners = ownersAfterPending(session);
+  for (const state of session.states.values()) {
+    const tags = new Set<string>();
+    for (const pid of state.provinces) {
+      const tag = pendingOwners.get(pid) ?? state.owner;
+      if (tag) tags.add(tag);
+    }
+    if (tags.size > 1) {
+      warn({
         code: "MIXED_OWNER",
-        message: `State ${state.id} has mixed owners`,
+        message: `State ${state.id} has mixed owners ${[...tags].join(", ")} — will split on apply`,
         state: state.id,
       });
     }
@@ -196,6 +219,44 @@ export function validate(session: MapSession): ValidateResult {
       code: "EMPTY_RAILWAYS",
       message: "map/railways.txt is empty — the game crashes on a new map without railways",
     });
+  }
+  for (const rw of session.railways) {
+    for (let i = 0; i < rw.provinces.length; i++) {
+      const pid = rw.provinces[i]!;
+      const p = session.provinces.get(pid);
+      if (!p || p.type !== "land") {
+        error({
+          code: "RAIL_NOT_LAND",
+          message: `Railway visits ${p ? p.type : "missing"} province ${pid}`,
+          province: pid,
+        });
+      }
+    }
+    for (let i = 0; i < rw.provinces.length - 1; i++) {
+      const a = session.provinces.get(rw.provinces[i]!);
+      const b = rw.provinces[i + 1]!;
+      if (a && !a.neighbors.includes(b)) {
+        error({
+          code: "RAIL_NOT_ADJACENT",
+          message: `Railway hop ${rw.provinces[i]} → ${b} is not 4-adjacent`,
+          province: rw.provinces[i],
+        });
+      }
+    }
+  }
+  for (const b of session.buildings) {
+    const x = Math.round(b.x);
+    const z = Math.round(b.z);
+    if (x < 0 || z < 0 || x >= session.width || z >= session.height) continue;
+    const pid = session.idGrid[z * session.width + x]!;
+    const p = session.provinces.get(pid);
+    if (p?.stateId !== undefined && p.stateId !== b.state) {
+      warn({
+        code: "BUILDING_STATE",
+        message: `${b.building} at ${x},${z} is listed on state ${b.state} but sits in state ${p.stateId}`,
+        state: b.state,
+      });
+    }
   }
   if (session.supplyNodes.length === 0) {
     error({
