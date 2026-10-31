@@ -1,0 +1,31 @@
+{
+  "name": "Sunset Isles",
+  "width": 256,
+  "height": 256,
+  "waterline": 94,
+  "wrap": false,
+  "edgeBands": false,
+  "seed": 7,
+  "provinceSpacing": 14,
+  "stateSize": 5,
+  "countries": [
+    {
+      "tag": "SUN",
+      "name": "Sunset",
+      "color": [
+        196,
+        72,
+        48
+      ]
+    },
+    {
+      "tag": "DAW",
+      "name": "Dawn",
+      "color": [
+        48,
+        96,
+        168
+      ]
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "name": "mapit",
+  "version": "0.1.0",
+  "description": "Hearts of Iron IV mapping suite for humans and agents \u2014 labeled atlases, MapChart paint, crash-proof validation, world generation.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "mapit": "./dist/cli/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build": "tsc -p tsconfig.build.json",
+    "mapit": "tsx src/cli/index.ts"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Kurczakokoko/mapit.git"
+  },
+  "keywords": [
+    "hoi4",
+    "hearts-of-iron",
+    "modding",
+    "map",
+    "paradox"
+  ],
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.5",
+    "citty": "^0.2.2",
+    "fast-png": "^8.0.0",
+    "hono": "^4.13.14",
+    "jomini": "^0.10.0"
+  }
+}
