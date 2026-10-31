@@ -119,10 +119,11 @@ export const UI_HTML = `<!doctype html>
     const canvas = document.getElementById('map');
     const ctx = canvas.getContext('2d');
     const state = {
-      meta: null, img: null, brush: null, painting: false, panning: false, space: false,
+      meta: null, img: null, imgctx: null, imageData: null, rgba: null, ids: null, index: null,
+      previewW: 0, previewH: 0, brush: null, painting: false, panning: false, space: false,
       lastId: 0, lastHit: 0, busy: false, camInit: false,
       cam: { zoom: 1, panX: 0, panY: 0 },
-      panFrom: null, hoverTimer: 0
+      panFrom: null, hoverTimer: 0, provinceCache: new Map()
     };
     let chain = Promise.resolve();
     function serial(fn) {
@@ -176,6 +177,91 @@ export const UI_HTML = `<!doctype html>
       }
       return r.json();
     }
+    function buildIndex(ids) {
+      const counts = new Map();
+      for (let i = 0; i < ids.length; i++) counts.set(ids[i], (counts.get(ids[i]) || 0) + 1);
+      const index = new Map();
+      const cursor = new Map();
+      for (const [id, n] of counts) {
+        index.set(id, new Uint32Array(n));
+        cursor.set(id, 0);
+      }
+      for (let i = 0; i < ids.length; i++) {
+        const id = ids[i];
+        const arr = index.get(id);
+        const k = cursor.get(id);
+        arr[k] = i;
+        cursor.set(id, k + 1);
+      }
+      return index;
+    }
+    function idAtMap(mx, mz) {
+      if (!state.ids || !state.meta) return 0;
+      const x = Math.min(state.previewW - 1, Math.max(0, Math.floor((mx * state.previewW) / state.meta.width)));
+      const y = Math.min(state.previewH - 1, Math.max(0, Math.floor(((state.meta.height - 1 - mz) * state.previewH) / state.meta.height)));
+      return state.ids[y * state.previewW + x] || 0;
+    }
+    function recolorProvince(id, rgb) {
+      if (!state.rgba || !state.imgctx || !state.index || !state.ids || !state.imageData) return;
+      const pixels = state.index.get(id);
+      if (!pixels) return;
+      const w = state.previewW, h = state.previewH, ids = state.ids, d = state.rgba;
+      let minX = w, minY = h, maxX = 0, maxY = 0, any = false;
+      for (let n = 0; n < pixels.length; n++) {
+        const i = pixels[n];
+        const x = i % w, y = (i / w) | 0;
+        const left = x === 0 ? ids[i + w - 1] : ids[i - 1];
+        const right = x === w - 1 ? ids[i - w + 1] : ids[i + 1];
+        if (left !== id || right !== id) continue;
+        if (y > 0 && ids[i - w] !== id) continue;
+        if (y < h - 1 && ids[i + w] !== id) continue;
+        const o = i * 4;
+        d[o] = rgb[0]; d[o + 1] = rgb[1]; d[o + 2] = rgb[2];
+        any = true;
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+      }
+      if (!any) return;
+      state.imgctx.putImageData(state.imageData, 0, 0, minX, minY, maxX - minX + 1, maxY - minY + 1);
+      draw();
+    }
+    async function loadPreview() {
+      const res = await fetch('/api/preview.bin');
+      if (!res.ok) throw new Error(await res.text());
+      const buf = await res.arrayBuffer();
+      const view = new DataView(buf);
+      if (view.getUint32(0, false) !== 0x4d504954) throw new Error('bad preview magic');
+      if (view.getUint32(4, true) !== 1) throw new Error('bad preview version');
+      const width = view.getUint32(8, true);
+      const height = view.getUint32(12, true);
+      const rgbLen = width * height * 3;
+      const rgb = new Uint8Array(buf, 16, rgbLen);
+      const idOffset = 16 + rgbLen;
+      const ids = idOffset % 4 === 0
+        ? new Uint32Array(buf, idOffset, width * height)
+        : new Uint32Array(buf.slice(idOffset));
+      const rgba = new Uint8ClampedArray(width * height * 4);
+      for (let i = 0, j = 0; i < rgb.length; i += 3, j += 4) {
+        rgba[j] = rgb[i]; rgba[j + 1] = rgb[i + 1]; rgba[j + 2] = rgb[i + 2]; rgba[j + 3] = 255;
+      }
+      const off = document.createElement('canvas');
+      off.width = width;
+      off.height = height;
+      const offctx = off.getContext('2d');
+      const imageData = new ImageData(rgba, width, height);
+      offctx.putImageData(imageData, 0, 0);
+      state.img = off;
+      state.imgctx = offctx;
+      state.rgba = rgba;
+      state.imageData = imageData;
+      state.ids = ids;
+      state.previewW = width;
+      state.previewH = height;
+      state.index = buildIndex(ids);
+      state.provinceCache = new Map();
+    }
     function renderBrushes() {
       if (!state.meta) return;
       const q = (document.getElementById('brushq').value || '').trim().toLowerCase();
@@ -210,18 +296,16 @@ export const UI_HTML = `<!doctype html>
         ? rows.length + ' matches'
         : onMap + ' on map · type to search the rest';
     }
-    async function reload() {
-      setBusy(true);
-      try {
-      state.meta = await json('/api/meta');
+    function applyMeta(meta) {
+      state.meta = meta;
       document.getElementById('mapmeta').textContent =
-        state.meta.width + '×' + state.meta.height + ' · ' + state.meta.provinces + ' provinces · ' +
-        state.meta.states + ' states';
-      const d = state.meta.diagnostics;
+        meta.width + '×' + meta.height + ' · ' + meta.provinces + ' provinces · ' +
+        meta.states + ' states';
+      const d = meta.diagnostics;
       const badge = document.getElementById('diag');
       badge.textContent = d.errors + ' errors / ' + d.warnings + ' warnings';
       badge.className = 'badge ' + (d.errors ? 'bad' : 'ok');
-      document.getElementById('pendingmeta').textContent = state.meta.pending + ' pending';
+      document.getElementById('pendingmeta').textContent = meta.pending + ' pending';
       const groups = d.groups || [];
       let html = '';
       if (groups.length) {
@@ -246,12 +330,20 @@ export const UI_HTML = `<!doctype html>
       }
       document.getElementById('errors').innerHTML = html;
       renderBrushes();
-      const img = new Image();
-      img.src = '/api/preview.png?' + Date.now();
-      await img.decode();
-      state.img = img;
-      layout();
-      if (state.lastHit) await showProvince(state.lastHit);
+    }
+    async function refreshMeta() {
+      applyMeta(await json('/api/meta'));
+    }
+    async function reload(full) {
+      if (full === undefined) full = !state.img;
+      setBusy(true);
+      try {
+        await refreshMeta();
+        if (full) {
+          await loadPreview();
+          layout();
+        }
+        if (state.lastHit) await showProvince(state.lastHit);
       } finally {
         if (!state.painting) setBusy(false);
       }
@@ -328,8 +420,14 @@ export const UI_HTML = `<!doctype html>
     }
     async function showProvince(id) {
       if (!id) return;
+      const cached = state.provinceCache.get(id);
+      if (cached) {
+        showPayload(cached);
+        return;
+      }
       try {
         const p = await json('/api/province/' + id);
+        state.provinceCache.set(id, p);
         showPayload(p);
       } catch (e) {
         if (e.status !== 404) throw e;
@@ -337,57 +435,59 @@ export const UI_HTML = `<!doctype html>
     }
     async function paintAt(mx, mz) {
       if (!state.brush) return;
-      const hit = await json('/api/hit', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ x: mx, z: mz })
-      });
-      if (!hit.province || hit.id === state.lastId) {
-        if (hit.province) showPayload(hit.province);
+      const id = idAtMap(mx, mz);
+      if (!id || id === state.lastId) {
+        if (id) await showProvince(id);
         return;
       }
-      if (hit.province.type !== 'land') {
-        showPayload(hit.province);
+      const cached = state.provinceCache.get(id);
+      if (cached && cached.type !== 'land') {
+        state.lastId = id;
+        showPayload(cached);
         return;
       }
-      state.lastId = hit.id;
-      showPayload(hit.province);
-      await json('/api/paint', {
+      const layer = document.getElementById('layer').value;
+      const r = await json('/api/paint', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ layer: document.getElementById('layer').value, brush: state.brush, provinces: [hit.id] })
+        body: JSON.stringify({ layer: layer, brush: state.brush, provinces: [id] })
       });
+      state.lastId = id;
+      if (r.province) {
+        state.provinceCache.set(id, r.province);
+        showPayload(r.province);
+      } else {
+        await showProvince(id);
+      }
+      if (r.painted && r.painted.length && layer === 'owner') {
+        const country = (state.meta.countries || []).find((c) => c.tag === state.brush);
+        if (country) recolorProvince(id, country.color);
+      }
     }
     function hoverAt(ev) {
       const pt = mapPoint(ev);
       if (!pt) return;
+      const id = idAtMap(pt.x, pt.z);
+      if (!id) return;
+      const cached = state.provinceCache.get(id);
+      if (cached) {
+        if (!state.painting) showPayload(cached);
+        return;
+      }
       clearTimeout(state.hoverTimer);
       state.hoverTimer = setTimeout(() => {
         serial(async () => {
-          const hit = await json('/api/hit', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ x: pt.x, z: pt.z })
-          });
-          if (hit.province && !state.painting) showPayload(hit.province);
+          if (state.painting) return;
+          await showProvince(id);
         });
-      }, 60);
+      }, 40);
     }
     canvas.addEventListener('contextmenu', (ev) => ev.preventDefault());
     canvas.addEventListener('mousedown', (ev) => {
       if (state.busy) return;
       if (ev.shiftKey && ev.button === 0) {
         const pt = mapPoint(ev);
-        if (pt) {
-          serial(async () => {
-            const hit = await json('/api/hit', {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ x: pt.x, z: pt.z })
-            });
-            if (hit.province) showPayload(hit.province);
-          });
-        }
+        if (pt) serial(() => showProvince(idAtMap(pt.x, pt.z)));
         ev.preventDefault();
         return;
       }
@@ -403,7 +503,6 @@ export const UI_HTML = `<!doctype html>
       if (!pt) return;
       state.painting = true;
       state.lastId = 0;
-      setBusy(true);
       serial(() => paintAt(pt.x, pt.z));
     });
     canvas.addEventListener('mousemove', (ev) => {
@@ -429,7 +528,7 @@ export const UI_HTML = `<!doctype html>
       }
       if (!state.painting) return;
       state.painting = false;
-      serial(async () => { await reload(); setBusy(false); });
+      serial(() => refreshMeta());
     });
     canvas.addEventListener('wheel', (ev) => {
       ev.preventDefault();
@@ -454,12 +553,12 @@ export const UI_HTML = `<!doctype html>
     document.getElementById('zoomout').onclick = () => zoomBy(1 / 1.25, canvas.width / 2, canvas.height / 2);
     document.getElementById('fit').onclick = () => fit();
     document.getElementById('brushq').addEventListener('input', renderBrushes);
-    document.getElementById('undo').onclick = () => serial(async () => { await json('/api/undo', { method: 'POST' }); await reload(); });
-    document.getElementById('discard').onclick = () => serial(async () => { await json('/api/discard', { method: 'POST' }); await reload(); });
+    document.getElementById('undo').onclick = () => serial(async () => { await json('/api/undo', { method: 'POST' }); await reload(true); });
+    document.getElementById('discard').onclick = () => serial(async () => { await json('/api/discard', { method: 'POST' }); await reload(true); });
     document.getElementById('apply').onclick = () => serial(async () => {
       const r = await json('/api/apply', { method: 'POST' });
       document.getElementById('status').textContent = 'Wrote ' + r.wrote.length + ' files, new states ' + r.createdStates;
-      await reload();
+      await reload(true);
     });
     document.getElementById('atlas').onclick = () => {
       const a = document.createElement('a');

@@ -6,7 +6,13 @@ import type { MapSession, PaintOp } from "../core/ir.ts";
 import type { LoadOptions } from "../core/load.ts";
 import { applyPending, ownersAfterPending, queuePaint } from "../core/paint.ts";
 import { validate } from "../core/validate.ts";
-import { encodeIdMapPng, renderPoliticalPreview, type Preview } from "./preview.ts";
+import {
+  encodeIdMapPng,
+  encodePreviewBin,
+  encodePreviewPng,
+  renderPoliticalPreview,
+  type Preview,
+} from "./preview.ts";
 import { UI_HTML } from "./ui.ts";
 
 export type ServeOpts = {
@@ -127,9 +133,17 @@ export function createApp(opts: ServeOpts): Hono {
     });
   });
 
+  app.get("/api/preview.bin", (c) => {
+    const preview = getPreview();
+    return c.body(Buffer.from(encodePreviewBin(preview)), 200, {
+      "content-type": "application/octet-stream",
+      "cache-control": "no-store",
+    });
+  });
+
   app.get("/api/preview.png", (c) => {
     const preview = getPreview();
-    return c.body(Buffer.from(preview.png), 200, { "content-type": "image/png" });
+    return c.body(Buffer.from(encodePreviewPng(preview)), 200, { "content-type": "image/png" });
   });
 
   app.get("/api/idmap.png", (c) => {
@@ -166,7 +180,11 @@ export function createApp(opts: ServeOpts): Hono {
         queuePaint(ctx.session, { layer, brush: String(body.brush).toUpperCase(), provinces });
         dirty();
       }
-      return c.json({ pending: ctx.session.pending.length });
+      return c.json({
+        pending: ctx.session.pending.length,
+        painted: provinces,
+        province: provinces[0] !== undefined ? provincePayload(ctx.session, provinces[0]) : null,
+      });
     });
   });
 

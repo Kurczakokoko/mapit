@@ -24,7 +24,17 @@ describe("serve API", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ layer: "owner", brush: "SPA", provinces: [2] }),
     });
-    expect((await paint.json()).pending).toBe(1);
+    const painted = await paint.json();
+    expect(painted.pending).toBe(1);
+    expect(painted.painted).toEqual([2]);
+    expect(painted.province.owner).toBe("SPA");
+    const previewBin = await app.request("/api/preview.bin");
+    expect(previewBin.status).toBe(200);
+    const bytes = new Uint8Array(await previewBin.arrayBuffer());
+    expect(bytes[0]).toBe(0x4d);
+    expect(bytes[1]).toBe(0x50);
+    expect(bytes[2]).toBe(0x49);
+    expect(bytes[3]).toBe(0x54);
     const pending = await app.request("/api/province/2");
     expect((await pending.json()).owner).toBe("SPA");
     const metaPending = await (await app.request("/api/meta")).json();
@@ -62,7 +72,9 @@ describe("serve API", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ layer: "owner", brush: "SPA", provinces: [sea.id] }),
     });
-    expect((await paintSea.json()).pending).toBe(0);
+    const seaPainted = await paintSea.json();
+    expect(seaPainted.pending).toBe(0);
+    expect(seaPainted.painted).toEqual([]);
     const atlas = await app.request("/api/atlas.json");
     expect(atlas.status).toBe(200);
     expect(atlas.headers.get("content-disposition")).toMatch(/atlas\.json/);
@@ -81,5 +93,7 @@ describe("serve API", () => {
     expect(UI_HTML).toContain("diag-group");
     expect(UI_HTML).toContain("brushmeta");
     expect(UI_HTML).toContain("shiftKey");
+    expect(UI_HTML).toContain("preview.bin");
+    expect(UI_HTML).toContain("recolorProvince");
   });
 });

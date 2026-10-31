@@ -2,15 +2,17 @@ import { encode as encodePng } from "fast-png";
 import { ownersAfterPending } from "../core/paint.ts";
 import type { MapSession } from "../core/ir.ts";
 
+export const PREVIEW_MAGIC = 0x4d504954; // "MPIT"
+
 export type Preview = {
   width: number;
   height: number;
   scale: number;
-  png: Uint8Array;
+  rgb: Uint8Array;
   ids: Uint32Array;
 };
 
-/** PNG row 0 is north (high z). The IR/idGrid still uses z=0 south. */
+/** Row 0 is north (high z). The IR/idGrid still uses z=0 south. */
 export function renderPoliticalPreview(session: MapSession, maxWidth = session.width): Preview {
   const cap = Math.max(1, maxWidth);
   const scale = Math.min(1, cap / session.width);
@@ -28,7 +30,7 @@ export function renderPoliticalPreview(session: MapSession, maxWidth = session.w
       const i = z * width + x;
       ids[i] = id;
       const p = session.provinces.get(id);
-      const o = (i * 3);
+      const o = i * 3;
       if (!p || p.id === 0) {
         rgb[o] = 255;
         rgb[o + 1] = 0;
@@ -61,8 +63,32 @@ export function renderPoliticalPreview(session: MapSession, maxWidth = session.w
     }
   }
   paintBorders(rgb, ids, width, height, session, owners);
-  const png = encodePng({ width, height, data: rgb, channels: 3, depth: 8 });
-  return { width, height, scale, png, ids };
+  return { width, height, scale, rgb, ids };
+}
+
+export function encodePreviewPng(preview: Preview): Uint8Array {
+  return encodePng({
+    width: preview.width,
+    height: preview.height,
+    data: preview.rgb,
+    channels: 3,
+    depth: 8,
+  });
+}
+
+/** Packed preview: big-endian magic "MPIT", then little-endian version/width/height, RGB, u32 ids. */
+export function encodePreviewBin(preview: Preview): Uint8Array {
+  const rgbLen = preview.rgb.byteLength;
+  const idsBytes = new Uint8Array(preview.ids.buffer, preview.ids.byteOffset, preview.ids.byteLength);
+  const out = new Uint8Array(16 + rgbLen + idsBytes.byteLength);
+  const view = new DataView(out.buffer);
+  view.setUint32(0, PREVIEW_MAGIC, false);
+  view.setUint32(4, 1, true);
+  view.setUint32(8, preview.width, true);
+  view.setUint32(12, preview.height, true);
+  out.set(preview.rgb, 16);
+  out.set(idsBytes, 16 + rgbLen);
+  return out;
 }
 
 /** 1 = province, 2 = state, 3 = country, 4 = land/sea coast. */

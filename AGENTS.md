@@ -30,7 +30,7 @@ pnpm mapit paint owner SPA --provinces 12,15,18 --mod "$MAPIT_MOD"
 pnpm mapit validate --mod "$MAPIT_MOD"
 ```
 
-The web UI (`mapit serve --mod PATH`) keeps paints pending until Apply. The CLI applies immediately. The painter is north-up (PNG y=0 is high z). Wheel zooms, Space/MMB pans. Political colours come from `common/countries/colors.txt` (`color = rgb { }` / `HSV { }`), which is what the in-game map uses.
+The web UI (`mapit serve --mod PATH`) keeps paints pending until Apply. The CLI applies immediately. The painter is north-up (preview row 0 is high z). Live strokes use `/api/preview.bin` (RGB + province ids) and recolor interiors in the browser; the raster is rebuilt only on first load, Apply, Undo, and Discard. Wheel zooms, Space/MMB pans. Political colours come from `common/countries/colors.txt` (`color = rgb { }` / `HSV { }` / `hsv360 { }`), which is what the in-game map uses.
 
 ## Generate a new world
 
